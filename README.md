@@ -19,10 +19,14 @@ El labeling mantiene información adicional (etiquetas) en los textos cifrados q
 **Operaciones básicas con labeling:**
 - Suma de textos cifrados
 - Multiplicación de textos cifrados con control de ruido mejorado
+- Rotación de columnas en textos cifrados
+- Aplicación de claves de evaluación para cambio de claves
 
 **Operaciones avanzadas (overflow):**
 - Multiplicación con overflow para operaciones de mayor profundidad
 - Suma con overflow (mixta y entre ciphertexts)
+- Rotación de columnas con overflow
+- Aplicación de claves de evaluación con overflow
 - Soporte para expresiones polinómicas complejas
 
 **Dos tipos de labeled ciphertexts:**
@@ -91,14 +95,37 @@ func main() {
 }
 ```
 
-### Ejecutar el ejemplo incluido
+### Ejemplos incluidos
 
+El proyecto incluye varios ejemplos que demuestran diferentes aspectos de la implementación:
+
+#### Ejemplo básico de suma y multiplicación con overflow
 ```bash
-cd examples
+cd examples/sum-mult-overflow
 go run main.go
 ```
+Realiza la operación `((v1 * v2) * v1) + v1` sobre vectores aleatorios, demostrando multiplicaciones múltiples y suma con overflow.
 
-El programa de ejemplo realiza la siguiente operación: `((v1 * v2) * v1) + v1` sobre vectores aleatorios y verifica que el resultado sea correcto, demostrando la capacidad de realizar múltiples multiplicaciones gracias al labeling.
+#### Ejemplo de claves de evaluación
+```bash
+cd examples/evaluationKeys
+go run main.go
+```
+Demuestra el uso de claves de evaluación para cambiar la clave secreta asociada a un texto cifrado, tanto para operaciones básicas como con overflow.
+
+#### Ejemplo de rotación básica
+```bash
+cd examples/rotate
+go run main.go
+```
+Muestra cómo realizar rotaciones de columnas en textos cifrados PlaintextLabeledciphertext usando claves de Galois.
+
+#### Ejemplo de rotación con overflow
+```bash
+cd examples/rotate-overflow
+go run main.go
+```
+Demuestra rotaciones de columnas en textos cifrados CiphertextLabeledciphertext resultantes de multiplicaciones con overflow.
 
 ## Estructura del Proyecto
 
@@ -107,7 +134,14 @@ El programa de ejemplo realiza la siguiente operación: `((v1 * v2) * v1) + v1` 
 ├── labeling/
 │   └── labeling.go          # Implementación principal de la librería
 ├── examples/
-│   └── main.go              # Ejemplo de uso
+│   ├── evaluationKeys/
+│   │   └── main.go          # Ejemplo de claves de evaluación
+│   ├── rotate/
+│   │   └── main.go          # Ejemplo de rotación básica
+│   ├── rotate-overflow/
+│   │   └── main.go          # Ejemplo de rotación con overflow
+│   └── sum-mult-overflow/
+│       └── main.go          # Ejemplo de suma y multiplicación con overflow
 ├── go.mod                   # Dependencias del proyecto
 └── README.md                # Este archivo
 ```
@@ -126,12 +160,21 @@ El programa de ejemplo realiza la siguiente operación: `((v1 * v2) * v1) + v1` 
 - `GenerateKeyPair()`: Genera par de claves (pública/privada)
 - `GenerateRelinearizationKey()`: Genera clave de relinealización
 - `GenerateMemEvaluationKeySet()`: Crea conjunto de claves de evaluación
+- `GenerateGaloisKeys()`: Genera claves de Galois para operaciones de rotación
+- `GenerateMemEvaluationKeySetWithGalois()`: Crea conjunto de claves con claves de Galois
+- `GenerateEvaluationKey()`: Genera clave de evaluación entre dos claves secretas
 
 #### Operaciones básicas
 - `Encrypt()`: Cifra un vector de valores
 - `Decrypt()`: Descifra un PlaintextLabeledciphertext
 - `Sum()`: Suma dos PlaintextLabeledciphertext
 - `Mult()`: Multiplica dos PlaintextLabeledciphertext
+
+#### Operaciones avanzadas
+- `RotateColumns()`: Rotación de columnas en PlaintextLabeledciphertext
+- `RotateColumnsOverflow()`: Rotación de columnas en CiphertextLabeledciphertext
+- `ApplyEvaluationKey()`: Aplica clave de evaluación a PlaintextLabeledciphertext
+- `ApplyEvaluationKeyOverflow()`: Aplica clave de evaluación a CiphertextLabeledciphertext
 
 #### Operaciones con overflow
 - `MultOverflow()`: Multiplicación que devuelve CiphertextLabeledciphertext
