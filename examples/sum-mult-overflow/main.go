@@ -91,7 +91,7 @@ func main() {
 	}
 
 	// Multiplicamos de nuevo el primer texto cifrado por el resultado de la multiplicación
-	labeledciphertex2Mult, err := labeling.MultOverflow(params, labeledciphertext1, labeledciphertextMult, Pk)
+	labeledciphertex2Mult, err := labeling.MultOverflow(params, labeledciphertext1, labeledciphertextMult, Pk, evk)
 	if err != nil {
 		log.Fatalf("Error al multiplicar los textos cifrados: %v", err)
 	}

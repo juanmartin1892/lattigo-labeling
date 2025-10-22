@@ -21,6 +21,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/bgv"
+	"github.com/tuneinsight/lattigo/v6/utils"
 	"github.com/tuneinsight/lattigo/v6/utils/sampling"
 )
 
@@ -74,6 +75,19 @@ func GenerateMemEvaluationKeySet(rlk *rlwe.RelinearizationKey) *rlwe.MemEvaluati
 	return rlwe.NewMemEvaluationKeySet(rlk)
 }
 
+func GenerateGaloisKeys(params Parameters, sk *rlwe.SecretKey, galEls []uint64) []*rlwe.GaloisKey {
+	kgen := rlwe.NewKeyGenerator(params)
+	galKeys := make([]*rlwe.GaloisKey, len(galEls))
+	for i, galEl := range galEls {
+		galKeys[i] = kgen.GenGaloisKeyNew(galEl, sk)
+	}
+	return galKeys
+}
+
+func GenerateMemEvaluationKeySetWithGalois(rlk *rlwe.RelinearizationKey, galKeys ...*rlwe.GaloisKey) *rlwe.MemEvaluationKeySet {
+	return rlwe.NewMemEvaluationKeySet(rlk, galKeys...)
+}
+
 func Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (PlaintextLabeledciphertext, error) {
 	// Instanciamos el generador de numeros aleatorios
 	prng, err := sampling.NewPRNG()
@@ -120,11 +134,11 @@ func Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (Plainte
 }
 
 // Decrypt para PlaintextLabeledciphertext
-func Decrypt(params *bgv.Parameters, key *rlwe.SecretKey, labeledciphertext PlaintextLabeledciphertext) ([]uint64, error) {
+func Decrypt(params Parameters, key *rlwe.SecretKey, labeledciphertext PlaintextLabeledciphertext) ([]uint64, error) {
 	// Operación normal con PlaintextElements
 	// m ← a + Dec(d)(sk, β)
 	maskResult := make([]uint64, params.MaxSlots())
-	if err := bgv.NewEncoder(*params).Decode(rlwe.NewDecryptor(params, key).DecryptNew(&labeledciphertext.elementB[0][0]), maskResult); err != nil {
+	if err := bgv.NewEncoder(params.Parameters).Decode(rlwe.NewDecryptor(params, key).DecryptNew(&labeledciphertext.elementB[0][0]), maskResult); err != nil {
 		return nil, err
 	}
 
@@ -303,7 +317,7 @@ func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLab
 }
 
 // MultOverflow para operaciones PlaintextLabeledciphertext
-func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey) (CiphertextLabeledciphertext, error) {
+func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error) {
 	// MultOverflow implementa: Enc(pk, a1·a2) + a1β2 + a2β1
 	// El resultado se almacena en elementA
 
@@ -324,7 +338,7 @@ func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 Plai
 		return CiphertextLabeledciphertext{}, err
 	}
 
-	evaluator := bgv.NewEvaluator(params.Parameters, nil)
+	evaluator := bgv.NewEvaluator(params.Parameters, evk)
 
 	// Calculamos a1β2 - sin conversiones de tipo!
 	a1beta2 := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
@@ -341,7 +355,18 @@ func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 Plai
 	}
 
 	// Calculamos α = Enc(pk, a1·a2) + a1β2 + a2β1
-	alpha := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+
+	// Primero asegurémonos de que todos tengan el mismo level
+	minLevel := utils.Min(utils.Min(productCiphertext.Level(), a1beta2.Level()), a2beta1.Level())
+
+	// Crear alpha con el nivel mínimo y degree 1
+	alpha := *rlwe.NewCiphertext(params, minLevel, 1)
+
+	// Ajustar levels
+	if productCiphertext.Level() > minLevel {
+		productCiphertext.Resize(productCiphertext.Degree(), minLevel)
+	}
+
 	err = evaluator.Add(productCiphertext, &a1beta2, &alpha)
 	if err != nil {
 		return CiphertextLabeledciphertext{}, err
@@ -423,4 +448,87 @@ func SumOverflowCiphertext(params Parameters, labeledciphertext1, labeledciphert
 	labeledciphertextSum.elementB = append(labeledciphertextSum.elementB, labeledciphertext2.elementB...)
 
 	return labeledciphertextSum, nil
+}
+
+func RotateColumns(params Parameters, labeledciphertext PlaintextLabeledciphertext, k int, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error) {
+	var rotatedCiphertext PlaintextLabeledciphertext
+
+	// RotateColumns en BGV funciona con dos mitades independientes
+	// Cada mitad rota circularmente dentro de sí misma
+	slots := params.MaxSlots()
+	halfSlots := slots / 2
+	rotatedCiphertext.elementsA = make(PlaintextElements, slots)
+
+	// Rotar la primera mitad (0 a halfSlots-1)
+	for i := 0; i < halfSlots; i++ {
+		sourceIndex := (i + k) % halfSlots
+		rotatedCiphertext.elementsA[i] = labeledciphertext.elementsA[sourceIndex]
+	}
+
+	// Rotar la segunda mitad (halfSlots a slots-1)
+	for i := halfSlots; i < slots; i++ {
+		sourceIndex := halfSlots + ((i - halfSlots + k) % halfSlots)
+		rotatedCiphertext.elementsA[i] = labeledciphertext.elementsA[sourceIndex]
+	}
+
+	// Copiamos la estructura de elementB haciendo una copia profunda
+	rotatedCiphertext.elementB = make([][]rlwe.Ciphertext, len(labeledciphertext.elementB))
+	for i := range labeledciphertext.elementB {
+		rotatedCiphertext.elementB[i] = make([]rlwe.Ciphertext, len(labeledciphertext.elementB[i]))
+		copy(rotatedCiphertext.elementB[i], labeledciphertext.elementB[i])
+	}
+
+	// Rotamos el elemento B sobre sí mismo
+	evaluator := bgv.NewEvaluator(params.Parameters, evk)
+	err := evaluator.RotateColumns(&rotatedCiphertext.elementB[0][0], k, &rotatedCiphertext.elementB[0][0])
+	if err != nil {
+		return rotatedCiphertext, err
+	}
+
+	return rotatedCiphertext, nil
+}
+
+func RotateColumnsOverflow(params Parameters, labeledciphertext CiphertextLabeledciphertext, k int, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error) {
+	var rotatedCiphertext CiphertextLabeledciphertext
+
+	evaluator := bgv.NewEvaluator(params.Parameters, evk)
+
+	// Normalizar y rotar elementoA
+	ctA, err := evaluator.AddNew((*rlwe.Ciphertext)(labeledciphertext.elementsA), []uint64{0})
+	if err != nil {
+		return rotatedCiphertext, err
+	}
+
+	rotatedA := rlwe.NewCiphertext(params.Parameters, ctA.Level(), 1)
+	err = evaluator.RotateColumns(ctA, k, rotatedA)
+	if err != nil {
+		return rotatedCiphertext, err
+	}
+
+	rotatedCiphertext.elementsA = (*CiphertextElement)(rotatedA)
+
+	// Rotar cada uno de los elementos B
+	rotatedCiphertext.elementB = make([][]rlwe.Ciphertext, len(labeledciphertext.elementB))
+	for i := range labeledciphertext.elementB {
+		rotatedCiphertext.elementB[i] = make([]rlwe.Ciphertext, len(labeledciphertext.elementB[i]))
+		for j := range labeledciphertext.elementB[i] {
+			sourceCt := &labeledciphertext.elementB[i][j]
+
+			// Normalizar el ciphertext - crea una copia del ciphertext asegurando degree 1
+			normalizedCt := rlwe.NewCiphertext(params.Parameters, sourceCt.Level(), 1)
+			err := evaluator.Add(sourceCt, []uint64{0}, normalizedCt)
+			if err != nil {
+				return rotatedCiphertext, err
+			}
+
+			// Crear nuevo ciphertext para el resultado y rotar
+			rotatedCiphertext.elementB[i][j] = *rlwe.NewCiphertext(params.Parameters, normalizedCt.Level(), 1)
+			err = evaluator.RotateColumns(normalizedCt, k, &rotatedCiphertext.elementB[i][j])
+			if err != nil {
+				return rotatedCiphertext, err
+			}
+		}
+	}
+
+	return rotatedCiphertext, nil
 }
