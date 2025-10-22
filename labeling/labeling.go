@@ -32,7 +32,7 @@ type CiphertextElement rlwe.Ciphertext
 // Labeledciphertext genérico que puede usar cualquier tipo para elementsA
 type Labeledciphertext[T any] struct {
 	elementsA T
-	elementB  [][]rlwe.Ciphertext
+	elementsB [][]rlwe.Ciphertext
 }
 
 // Aliases de tipo para mayor claridad
@@ -126,9 +126,9 @@ func Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (Plainte
 		return labeledciphertext, err
 	}
 
-	labeledciphertext.elementB = make([][]rlwe.Ciphertext, 1)
-	labeledciphertext.elementB[0] = make([]rlwe.Ciphertext, 1)
-	labeledciphertext.elementB[0][0] = *ciphertextMask
+	labeledciphertext.elementsB = make([][]rlwe.Ciphertext, 1)
+	labeledciphertext.elementsB[0] = make([]rlwe.Ciphertext, 1)
+	labeledciphertext.elementsB[0][0] = *ciphertextMask
 
 	return labeledciphertext, nil
 }
@@ -138,7 +138,7 @@ func Decrypt(params Parameters, key *rlwe.SecretKey, labeledciphertext Plaintext
 	// Operación normal con PlaintextElements
 	// m ← a + Dec(d)(sk, β)
 	maskResult := make([]uint64, params.MaxSlots())
-	if err := bgv.NewEncoder(params.Parameters).Decode(rlwe.NewDecryptor(params, key).DecryptNew(&labeledciphertext.elementB[0][0]), maskResult); err != nil {
+	if err := bgv.NewEncoder(params.Parameters).Decode(rlwe.NewDecryptor(params, key).DecryptNew(&labeledciphertext.elementsB[0][0]), maskResult); err != nil {
 		return nil, err
 	}
 
@@ -165,17 +165,17 @@ func DecryptOverflow(params Parameters, key *rlwe.SecretKey, labeledciphertext C
 	}
 
 	sumBetas := make([]uint64, params.MaxSlots())
-	for i := range labeledciphertext.elementB {
+	for i := range labeledciphertext.elementsB {
 		multBetas := make([]uint64, params.MaxSlots())
 		// inicializamos el vector multBetas a 1s
 		for j := range multBetas {
 			multBetas[j] = 1
 		}
 
-		for j := range labeledciphertext.elementB[i] {
+		for j := range labeledciphertext.elementsB[i] {
 			// Desciframos cada βj
 			plainBeta := make([]uint64, params.MaxSlots())
-			if err := bgv.NewEncoder(params.Parameters).Decode(rlwe.NewDecryptor(params, key).DecryptNew(&labeledciphertext.elementB[i][j]), plainBeta); err != nil {
+			if err := bgv.NewEncoder(params.Parameters).Decode(rlwe.NewDecryptor(params, key).DecryptNew(&labeledciphertext.elementsB[i][j]), plainBeta); err != nil {
 				return nil, err
 			}
 			// Acumulamos el producto de los βj
@@ -210,13 +210,13 @@ func Sum(params bgv.Parameters, labeledciphertext1, labeledciphertext2 Plaintext
 		labeledciphertextSum.elementsA = append(labeledciphertextSum.elementsA, sum)
 	}
 
-	// Inicializar elementB
-	labeledciphertextSum.elementB = make([][]rlwe.Ciphertext, 1)
-	labeledciphertextSum.elementB[0] = make([]rlwe.Ciphertext, 1)
-	labeledciphertextSum.elementB[0][0] = *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	// Inicializar elementsB
+	labeledciphertextSum.elementsB = make([][]rlwe.Ciphertext, 1)
+	labeledciphertextSum.elementsB[0] = make([]rlwe.Ciphertext, 1)
+	labeledciphertextSum.elementsB[0][0] = *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
 
 	evaluator := bgv.NewEvaluator(params, nil)
-	err := evaluator.Add(&labeledciphertext1.elementB[0][0], &labeledciphertext2.elementB[0][0], &labeledciphertextSum.elementB[0][0])
+	err := evaluator.Add(&labeledciphertext1.elementsB[0][0], &labeledciphertext2.elementsB[0][0], &labeledciphertextSum.elementsB[0][0])
 	if err != nil {
 		return labeledciphertextSum, err
 	}
@@ -255,41 +255,41 @@ func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLab
 
 	// Realizamos ahora el siguiente proceso:
 	// (β1 X β2) + a1β2 + a2β1 + Enc(d)(pk, r)
-	labeledciphertextProduct.elementB = make([][]rlwe.Ciphertext, 1)
-	labeledciphertextProduct.elementB[0] = make([]rlwe.Ciphertext, 1)
-	labeledciphertextProduct.elementB[0][0] = *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	labeledciphertextProduct.elementsB = make([][]rlwe.Ciphertext, 1)
+	labeledciphertextProduct.elementsB[0] = make([]rlwe.Ciphertext, 1)
+	labeledciphertextProduct.elementsB[0][0] = *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
 
 	// Primero multiplicamos los textos cifrados
 	evaluator := bgv.NewEvaluator(params.Parameters, evk)
-	err = evaluator.MulRelin(&labeledciphertext1.elementB[0][0], &labeledciphertext2.elementB[0][0], &labeledciphertextProduct.elementB[0][0])
+	err = evaluator.MulRelin(&labeledciphertext1.elementsB[0][0], &labeledciphertext2.elementsB[0][0], &labeledciphertextProduct.elementsB[0][0])
 	if err != nil {
 		return labeledciphertextProduct, err
 	}
 
 	// Ahora calculamos a1β2
-	labeledciphertext1ElementB := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
-	err = evaluator.Mul(&labeledciphertext1.elementB[0][0], []uint64(labeledciphertext2.elementsA), &labeledciphertext1ElementB)
+	labeledciphertext1elementsB := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	err = evaluator.Mul(&labeledciphertext1.elementsB[0][0], []uint64(labeledciphertext2.elementsA), &labeledciphertext1elementsB)
 	if err != nil {
 		return labeledciphertextProduct, err
 	}
 
 	// Sumamos a1β2 al resultado
 	// (β1 X β2) + a1β2
-	err = evaluator.Add(&labeledciphertextProduct.elementB[0][0], &labeledciphertext1ElementB, &labeledciphertextProduct.elementB[0][0])
+	err = evaluator.Add(&labeledciphertextProduct.elementsB[0][0], &labeledciphertext1elementsB, &labeledciphertextProduct.elementsB[0][0])
 	if err != nil {
 		return labeledciphertextProduct, err
 	}
 
 	// Ahora calculamos a2β1
-	labeledciphertext2ElementB := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
-	err = evaluator.Mul(&labeledciphertext2.elementB[0][0], []uint64(labeledciphertext1.elementsA), &labeledciphertext2ElementB)
+	labeledciphertext2elementsB := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	err = evaluator.Mul(&labeledciphertext2.elementsB[0][0], []uint64(labeledciphertext1.elementsA), &labeledciphertext2elementsB)
 	if err != nil {
 		return labeledciphertextProduct, err
 	}
 
 	// Sumamos a2β1 al resultado
 	// (β1 X β2) + a1β2 + a2β1
-	err = evaluator.Add(&labeledciphertextProduct.elementB[0][0], &labeledciphertext2ElementB, &labeledciphertextProduct.elementB[0][0])
+	err = evaluator.Add(&labeledciphertextProduct.elementsB[0][0], &labeledciphertext2elementsB, &labeledciphertextProduct.elementsB[0][0])
 	if err != nil {
 		return labeledciphertextProduct, err
 	}
@@ -308,7 +308,7 @@ func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLab
 
 	// Sumamos el texto cifrado del vector aleatorio al resultado final
 	// (β1 X β2) + a1β2 + a2β1 + Enc(pk, r)
-	err = evaluator.Add(&labeledciphertextProduct.elementB[0][0], ciphertextRandomVector, &labeledciphertextProduct.elementB[0][0])
+	err = evaluator.Add(&labeledciphertextProduct.elementsB[0][0], ciphertextRandomVector, &labeledciphertextProduct.elementsB[0][0])
 	if err != nil {
 		return labeledciphertextProduct, err
 	}
@@ -342,14 +342,14 @@ func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 Plai
 
 	// Calculamos a1β2 - sin conversiones de tipo!
 	a1beta2 := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
-	err = evaluator.Mul(&labeledciphertext2.elementB[0][0], []uint64(labeledciphertext1.elementsA), &a1beta2)
+	err = evaluator.Mul(&labeledciphertext2.elementsB[0][0], []uint64(labeledciphertext1.elementsA), &a1beta2)
 	if err != nil {
 		return CiphertextLabeledciphertext{}, err
 	}
 
 	// Calculamos a2β1 - sin conversiones de tipo!
 	a2beta1 := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
-	err = evaluator.Mul(&labeledciphertext1.elementB[0][0], []uint64(labeledciphertext2.elementsA), &a2beta1)
+	err = evaluator.Mul(&labeledciphertext1.elementsB[0][0], []uint64(labeledciphertext2.elementsA), &a2beta1)
 	if err != nil {
 		return CiphertextLabeledciphertext{}, err
 	}
@@ -382,11 +382,11 @@ func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 Plai
 	// Establecemos elementsA como α para overflow
 	labeledciphertextProduct.elementsA = (*CiphertextElement)(&alpha)
 
-	// Para elementB, almacenamos [β1, β2]
-	labeledciphertextProduct.elementB = make([][]rlwe.Ciphertext, 1)
-	labeledciphertextProduct.elementB[0] = make([]rlwe.Ciphertext, 2)
-	labeledciphertextProduct.elementB[0][0] = labeledciphertext1.elementB[0][0] // β1
-	labeledciphertextProduct.elementB[0][1] = labeledciphertext2.elementB[0][0] // β2
+	// Para elementsB, almacenamos [β1, β2]
+	labeledciphertextProduct.elementsB = make([][]rlwe.Ciphertext, 1)
+	labeledciphertextProduct.elementsB[0] = make([]rlwe.Ciphertext, 2)
+	labeledciphertextProduct.elementsB[0][0] = labeledciphertext1.elementsB[0][0] // β1
+	labeledciphertextProduct.elementsB[0][1] = labeledciphertext2.elementsB[0][0] // β2
 
 	return labeledciphertextProduct, nil
 }
@@ -412,10 +412,10 @@ func SumOverflow(params Parameters, labeledciphertext1 CiphertextLabeledcipherte
 	// Set the result as elementsA
 	labeledciphertextSum.elementsA = (*CiphertextElement)(result)
 
-	// Para elementB, concatenamos los elementos B de ambos textos cifrados
+	// Para elementsB, concatenamos los elementos B de ambos textos cifrados
 	// β ← [β1, β2]
-	labeledciphertextSum.elementB = append(labeledciphertextSum.elementB, labeledciphertext1.elementB...)
-	labeledciphertextSum.elementB = append(labeledciphertextSum.elementB, labeledciphertext2.elementB...)
+	labeledciphertextSum.elementsB = append(labeledciphertextSum.elementsB, labeledciphertext1.elementsB...)
+	labeledciphertextSum.elementsB = append(labeledciphertextSum.elementsB, labeledciphertext2.elementsB...)
 
 	return labeledciphertextSum, nil
 }
@@ -442,10 +442,10 @@ func SumOverflowCiphertext(params Parameters, labeledciphertext1, labeledciphert
 	// Set the result as elementsA
 	labeledciphertextSum.elementsA = (*CiphertextElement)(result)
 
-	// Para elementB, concatenamos los elementos B de ambos textos cifrados
+	// Para elementsB, concatenamos los elementos B de ambos textos cifrados
 	// β ← [β1, β2]
-	labeledciphertextSum.elementB = append(labeledciphertextSum.elementB, labeledciphertext1.elementB...)
-	labeledciphertextSum.elementB = append(labeledciphertextSum.elementB, labeledciphertext2.elementB...)
+	labeledciphertextSum.elementsB = append(labeledciphertextSum.elementsB, labeledciphertext1.elementsB...)
+	labeledciphertextSum.elementsB = append(labeledciphertextSum.elementsB, labeledciphertext2.elementsB...)
 
 	return labeledciphertextSum, nil
 }
@@ -471,16 +471,16 @@ func RotateColumns(params Parameters, labeledciphertext PlaintextLabeledcipherte
 		rotatedCiphertext.elementsA[i] = labeledciphertext.elementsA[sourceIndex]
 	}
 
-	// Copiamos la estructura de elementB haciendo una copia profunda
-	rotatedCiphertext.elementB = make([][]rlwe.Ciphertext, len(labeledciphertext.elementB))
-	for i := range labeledciphertext.elementB {
-		rotatedCiphertext.elementB[i] = make([]rlwe.Ciphertext, len(labeledciphertext.elementB[i]))
-		copy(rotatedCiphertext.elementB[i], labeledciphertext.elementB[i])
+	// Copiamos la estructura de elementsB haciendo una copia profunda
+	rotatedCiphertext.elementsB = make([][]rlwe.Ciphertext, len(labeledciphertext.elementsB))
+	for i := range labeledciphertext.elementsB {
+		rotatedCiphertext.elementsB[i] = make([]rlwe.Ciphertext, len(labeledciphertext.elementsB[i]))
+		copy(rotatedCiphertext.elementsB[i], labeledciphertext.elementsB[i])
 	}
 
 	// Rotamos el elemento B sobre sí mismo
 	evaluator := bgv.NewEvaluator(params.Parameters, evk)
-	err := evaluator.RotateColumns(&rotatedCiphertext.elementB[0][0], k, &rotatedCiphertext.elementB[0][0])
+	err := evaluator.RotateColumns(&rotatedCiphertext.elementsB[0][0], k, &rotatedCiphertext.elementsB[0][0])
 	if err != nil {
 		return rotatedCiphertext, err
 	}
@@ -508,11 +508,11 @@ func RotateColumnsOverflow(params Parameters, labeledciphertext CiphertextLabele
 	rotatedCiphertext.elementsA = (*CiphertextElement)(rotatedA)
 
 	// Rotar cada uno de los elementos B
-	rotatedCiphertext.elementB = make([][]rlwe.Ciphertext, len(labeledciphertext.elementB))
-	for i := range labeledciphertext.elementB {
-		rotatedCiphertext.elementB[i] = make([]rlwe.Ciphertext, len(labeledciphertext.elementB[i]))
-		for j := range labeledciphertext.elementB[i] {
-			sourceCt := &labeledciphertext.elementB[i][j]
+	rotatedCiphertext.elementsB = make([][]rlwe.Ciphertext, len(labeledciphertext.elementsB))
+	for i := range labeledciphertext.elementsB {
+		rotatedCiphertext.elementsB[i] = make([]rlwe.Ciphertext, len(labeledciphertext.elementsB[i]))
+		for j := range labeledciphertext.elementsB[i] {
+			sourceCt := &labeledciphertext.elementsB[i][j]
 
 			// Normalizar el ciphertext - crea una copia del ciphertext asegurando degree 1
 			normalizedCt := rlwe.NewCiphertext(params.Parameters, sourceCt.Level(), 1)
@@ -522,8 +522,8 @@ func RotateColumnsOverflow(params Parameters, labeledciphertext CiphertextLabele
 			}
 
 			// Crear nuevo ciphertext para el resultado y rotar
-			rotatedCiphertext.elementB[i][j] = *rlwe.NewCiphertext(params.Parameters, normalizedCt.Level(), 1)
-			err = evaluator.RotateColumns(normalizedCt, k, &rotatedCiphertext.elementB[i][j])
+			rotatedCiphertext.elementsB[i][j] = *rlwe.NewCiphertext(params.Parameters, normalizedCt.Level(), 1)
+			err = evaluator.RotateColumns(normalizedCt, k, &rotatedCiphertext.elementsB[i][j])
 			if err != nil {
 				return rotatedCiphertext, err
 			}
