@@ -88,6 +88,12 @@ func GenerateMemEvaluationKeySetWithGalois(rlk *rlwe.RelinearizationKey, galKeys
 	return rlwe.NewMemEvaluationKeySet(rlk, galKeys...)
 }
 
+func GenerateEvaluationKey(params Parameters, skA *rlwe.SecretKey, skB *rlwe.SecretKey) *rlwe.EvaluationKey {
+	kgen := rlwe.NewKeyGenerator(params)
+
+	return kgen.GenEvaluationKeyNew(skA, skB)
+}
+
 func Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (PlaintextLabeledciphertext, error) {
 	// Instanciamos el generador de numeros aleatorios
 	prng, err := sampling.NewPRNG()
@@ -531,4 +537,47 @@ func RotateColumnsOverflow(params Parameters, labeledciphertext CiphertextLabele
 	}
 
 	return rotatedCiphertext, nil
+}
+
+func ApplyEvaluationKey(params Parameters, evalKey rlwe.EvaluationKey, labeledciphertext PlaintextLabeledciphertext) (*PlaintextLabeledciphertext, error) {
+
+	evaluator := bgv.NewEvaluator(params.Parameters, nil)
+
+	ctOut, err := evaluator.ApplyEvaluationKeyNew(&labeledciphertext.elementsB[0][0], &evalKey)
+	if err != nil {
+		return nil, err
+	}
+
+	labeledciphertext.elementsB[0][0] = *ctOut
+
+	return &labeledciphertext, nil
+}
+
+func ApplyEvaluationKeyOverflow(params Parameters, evalKey rlwe.EvaluationKey, labeledciphertext CiphertextLabeledciphertext) (*CiphertextLabeledciphertext, error) {
+
+	// Aplicar la clave de evaluación sobre elementsA
+	evaluator := bgv.NewEvaluator(params.Parameters, nil)
+
+	ctIn := (*rlwe.Ciphertext)(labeledciphertext.elementsA)
+
+	ctOut, err := evaluator.ApplyEvaluationKeyNew(ctIn, &evalKey)
+	if err != nil {
+		return nil, err
+	}
+
+	labeledciphertext.elementsA = (*CiphertextElement)(ctOut)
+
+	// Aplicar la clave de evaluación sobre cada elemento de elementsB
+	for i := range labeledciphertext.elementsB {
+		for j := range labeledciphertext.elementsB[i] {
+			ctInB := &labeledciphertext.elementsB[i][j]
+			ctOutB, err := evaluator.ApplyEvaluationKeyNew(ctInB, &evalKey)
+			if err != nil {
+				return nil, err
+			}
+			labeledciphertext.elementsB[i][j] = *ctOutB
+		}
+	}
+
+	return &labeledciphertext, nil
 }
