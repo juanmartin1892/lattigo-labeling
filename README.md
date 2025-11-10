@@ -6,11 +6,11 @@ Implementación de la técnica de labeling aplicada a esquemas de cifrado homom�
 
 Este proyecto implementa operaciones de cifrado homomórfico con la técnica de **labeling**, permitiendo realizar operaciones aritméticas más complejas sobre datos cifrados sin que el crecimiento del ruido impida su ejecución. La implementación se basa en el esquema BGV (Brakerski-Gentry-Vaikuntanathan) y extiende las capacidades computacionales del cifrado homomórfico estándar.
 
-Esta implementación está basada en el paper **"Multiparty Computation from Somewhat Homomorphic Encryption"** de Damgård, Pastro, Smart y Zakarias (2014), disponible en [https://eprint.iacr.org/2014/813.pdf](https://eprint.iacr.org/2014/813.pdf).
+Esta implementación está basada en el paper **"Labeling Homomorphic Encryption: Computing on Encrypted Data with Less Noise"** de Catalano y Fiore (2015), disponible en [https://eprint.iacr.org/2014/813.pdf](https://eprint.iacr.org/2014/813.pdf).
 
 ### ¿Qué es Labeling?
 
-La técnica de labeling permite ejecutar operaciones homomórficas más complejas controlando el crecimiento del ruido inherente a estas operaciones. Por ejemplo mientras que un esquema homomórfico estándar podría permitir multiplicaciones hasta un nivel 3 (x³), la técnica de labeling permite realizar multiplicaciones adicionales. Esto posibilita operaciones como x³ × x³ = x⁶, llegando efectivamente a un nivel 6 de profundidad multiplicativa.
+La técnica de labeling permite ejecutar operaciones homomórficas más complejas controlando el crecimiento del ruido inherente a estas operaciones. Por ejemplo mientras que un esquema homomórfico estándar podría permitir multiplicaciones hasta un cierto nivel (x³), la técnica de labeling permite realizar multiplicaciones adicionales. Esto posibilita operaciones como x³ × x³ = x⁶, llegando efectivamente a un nivel superior de profundidad multiplicativa.
 
 El labeling mantiene información adicional (etiquetas) en los textos cifrados que permite gestionar el presupuesto de ruido de forma más eficiente, ampliando las capacidades computacionales sin comprometer la seguridad.
 
