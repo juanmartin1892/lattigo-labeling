@@ -44,13 +44,22 @@ type Parameters struct {
 	bgv.Parameters
 }
 
-// Constructor del servicio
+// NewParametersFromLiteral creates a new set of BGV parameters for labeling operations
+// from literal values.
+//
+// Parameters:
+//   - logN: base-2 logarithm of the polynomial degree (number of slots = 2^(logN-1))
+//   - LogQ: moduli for the operation chain (in base-2 logarithm)
+//   - LogP: auxiliary moduli for key-switching (in base-2 logarithm)
+//   - PlaintextModulus: modulus of the message space
+//
+// Returns the configured parameters and an error if the configuration is invalid.
 func NewParametersFromLiteral(logN int, LogQ []int, LogP []int, PlaintextModulus uint64) (Parameters, error) {
 	params, err := bgv.NewParametersFromLiteral(bgv.ParametersLiteral{
-		LogN:             14,
-		LogQ:             []int{56, 55, 55, 54, 54, 54},
-		LogP:             []int{55, 55},
-		PlaintextModulus: 0x3ee0001,
+		LogN:             logN,
+		LogQ:             LogQ,
+		LogP:             LogP,
+		PlaintextModulus: PlaintextModulus,
 	})
 
 	if err != nil {
@@ -60,21 +69,42 @@ func NewParametersFromLiteral(logN int, LogQ []int, LogP []int, PlaintextModulus
 	return Parameters{params}, nil
 }
 
+// GenerateKeyPair generates a key pair (secret and public) for the BGV scheme.
+//
+// Returns:
+//   - sk: secret key for decryption
+//   - pk: public key for encryption
 func GenerateKeyPair(params Parameters) (*rlwe.SecretKey, rlwe.EncryptionKey) {
 	kgen := rlwe.NewKeyGenerator(params)
 	sk, pk := kgen.GenKeyPairNew()
 	return sk, pk
 }
 
+// GenerateRelinearizationKey generates a relinearization key necessary to reduce
+// the size of ciphertexts after homomorphic multiplications.
+//
+// Relinearization converts higher-degree ciphertexts back to degree 1, allowing
+// multiple consecutive multiplications to be performed.
 func GenerateRelinearizationKey(params Parameters, sk *rlwe.SecretKey) *rlwe.RelinearizationKey {
 	kgen := rlwe.NewKeyGenerator(params)
 	return kgen.GenRelinearizationKeyNew(sk)
 }
 
+// GenerateMemEvaluationKeySet creates an in-memory evaluation key set containing
+// only the relinearization key.
+//
+// This is used for basic homomorphic operations that don't require Galois keys
+// (rotations) or evaluation keys (key switching between parties).
 func GenerateMemEvaluationKeySet(rlk *rlwe.RelinearizationKey) *rlwe.MemEvaluationKeySet {
 	return rlwe.NewMemEvaluationKeySet(rlk)
 }
 
+// GenerateGaloisKeys generates Galois keys for the specified Galois elements.
+//
+// Galois keys enable column rotation operations on ciphertexts. The galEls parameter
+// should contain the Galois elements corresponding to the desired rotation steps.
+//
+// For column rotation by k positions, use params.GaloisElement(k).
 func GenerateGaloisKeys(params Parameters, sk *rlwe.SecretKey, galEls []uint64) []*rlwe.GaloisKey {
 	kgen := rlwe.NewKeyGenerator(params)
 	galKeys := make([]*rlwe.GaloisKey, len(galEls))
@@ -84,16 +114,36 @@ func GenerateGaloisKeys(params Parameters, sk *rlwe.SecretKey, galEls []uint64) 
 	return galKeys
 }
 
+// GenerateMemEvaluationKeySetWithGalois creates an in-memory evaluation key set
+// containing both relinearization and Galois keys.
+//
+// This enables homomorphic operations including multiplication, rotation, and
+// key switching.
 func GenerateMemEvaluationKeySetWithGalois(rlk *rlwe.RelinearizationKey, galKeys ...*rlwe.GaloisKey) *rlwe.MemEvaluationKeySet {
 	return rlwe.NewMemEvaluationKeySet(rlk, galKeys...)
 }
 
+// GenerateEvaluationKey generates an evaluation key for switching from secret key
+// skA to secret key skB.
+//
+// This allows transferring ownership of a ciphertext encrypted under skA to be
+// decryptable by skB, useful in multiparty computation scenarios.
 func GenerateEvaluationKey(params Parameters, skA *rlwe.SecretKey, skB *rlwe.SecretKey) *rlwe.EvaluationKey {
 	kgen := rlwe.NewKeyGenerator(params)
 
 	return kgen.GenEvaluationKeyNew(skA, skB)
 }
 
+// Encrypt encrypts a vector of values using the labeling scheme with plaintext
+// elements A.
+//
+// The algorithm implements:
+//   - Generates random masks b for each slot
+//   - Computes a ← (m - b) mod PlaintextModulus
+//   - Encrypts β ← Enc(b)
+//
+// Returns a PlaintextLabeledciphertext where elementsA contains the plaintext
+// values a and elementsB contains the ciphertext β.
 func Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (PlaintextLabeledciphertext, error) {
 	// Instanciamos el generador de numeros aleatorios
 	prng, err := sampling.NewPRNG()
@@ -139,7 +189,13 @@ func Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (Plainte
 	return labeledciphertext, nil
 }
 
-// Decrypt para PlaintextLabeledciphertext
+// Decrypt decrypts a PlaintextLabeledciphertext to recover the original plaintext values.
+//
+// The algorithm implements:
+//   - Decrypts the mask: b ← Dec(β)
+//   - Recovers the message: m ← (a + b) mod PlaintextModulus
+//
+// Returns the decrypted vector of values.
 func Decrypt(params Parameters, key *rlwe.SecretKey, labeledciphertext PlaintextLabeledciphertext) ([]uint64, error) {
 	// Operación normal con PlaintextElements
 	// m ← a + Dec(d)(sk, β)
@@ -158,7 +214,15 @@ func Decrypt(params Parameters, key *rlwe.SecretKey, labeledciphertext Plaintext
 	return value, nil
 }
 
-// DecryptOverflow para CiphertextLabeledciphertext
+// DecryptOverflow decrypts a CiphertextLabeledciphertext with multiple B components
+// resulting from overflow operations.
+//
+// The algorithm implements:
+//   - Decrypts α: Dec(α)
+//   - For each component i in B: computes ∏ⱼ Dec(βᵢⱼ)
+//   - Returns: m = Dec(α) + ∑ᵢ ∏ⱼ Dec(βᵢⱼ) mod PlaintextModulus
+//
+// This is used to decrypt results from MultOverflow and subsequent overflow operations.
 func DecryptOverflow(params Parameters, key *rlwe.SecretKey, labeledciphertext CiphertextLabeledciphertext) ([]uint64, error) {
 	// Para overflow: m1m2 = Dec(α) + ∑ Dec(β1)·Dec(β2)
 	// α contiene Enc(pk, m1m2 - b1b2)
@@ -205,7 +269,13 @@ func DecryptOverflow(params Parameters, key *rlwe.SecretKey, labeledciphertext C
 	return value, nil
 }
 
-// Sum para PlaintextLabeledciphertext
+// Sum adds two PlaintextLabeledciphertext homomorphically.
+//
+// The algorithm implements:
+//   - a ← (a₁ + a₂) mod PlaintextModulus
+//   - β ← β₁ + β₂ (homomorphic addition)
+//
+// Returns the sum as a PlaintextLabeledciphertext.
 func Sum(params bgv.Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error) {
 	var labeledciphertextSum PlaintextLabeledciphertext
 
@@ -230,7 +300,15 @@ func Sum(params bgv.Parameters, labeledciphertext1, labeledciphertext2 Plaintext
 	return labeledciphertextSum, nil
 }
 
-// Mult para PlaintextLabeledciphertext
+// Mult multiplies two PlaintextLabeledciphertext homomorphically.
+//
+// The algorithm implements:
+//   - Generates random r
+//   - Computes a ← (a₁ × a₂ - r) mod PlaintextModulus
+//   - Computes β ← (β₁ × β₂) + a₁β₂ + a₂β₁ + Enc(r)
+//
+// The result is relinearized using the evaluation key set to keep the ciphertext
+// at degree 1. Returns a PlaintextLabeledciphertext.
 func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error) {
 	// Empezamos calculando la componente A
 	// a ← (a1 × a2 − r) ∈ M
@@ -322,7 +400,15 @@ func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLab
 	return labeledciphertextProduct, nil
 }
 
-// MultOverflow para operaciones PlaintextLabeledciphertext
+// MultOverflow multiplies two PlaintextLabeledciphertext and returns a
+// CiphertextLabeledciphertext to support deeper multiplicative depth.
+//
+// The algorithm implements:
+//   - Computes α ← Enc(a₁·a₂) + a₁β₂ + a₂β₁
+//   - Sets β ← [β₁, β₂]
+//
+// The overflow representation allows subsequent multiplications beyond the noise
+// budget of standard multiplication. Returns a CiphertextLabeledciphertext.
 func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error) {
 	// MultOverflow implementa: Enc(pk, a1·a2) + a1β2 + a2β1
 	// El resultado se almacena en elementA
@@ -397,7 +483,14 @@ func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 Plai
 	return labeledciphertextProduct, nil
 }
 
-// SumOverflow para operaciones mixtas entre CiphertextLabeledciphertext y PlaintextLabeledciphertext
+// SumOverflow adds a CiphertextLabeledciphertext and a PlaintextLabeledciphertext.
+//
+// The algorithm implements:
+//   - Computes α ← α₁ + a₂
+//   - Appends β₂ to the list of B components
+//
+// This allows mixing overflow and non-overflow ciphertexts. Returns a
+// CiphertextLabeledciphertext.
 func SumOverflow(params Parameters, labeledciphertext1 CiphertextLabeledciphertext, labeledciphertext2 PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error) {
 	var labeledciphertextSum CiphertextLabeledciphertext
 
@@ -426,7 +519,13 @@ func SumOverflow(params Parameters, labeledciphertext1 CiphertextLabeledcipherte
 	return labeledciphertextSum, nil
 }
 
-// SumOverflowCiphertext para operaciones entre CiphertextLabeledciphertext
+// SumOverflowCiphertext adds two CiphertextLabeledciphertext homomorphically.
+//
+// The algorithm implements:
+//   - Computes α ← α₁ + α₂
+//   - Concatenates β components: β ← [β₁, β₂]
+//
+// Returns the sum as a CiphertextLabeledciphertext.
 func SumOverflowCiphertext(params Parameters, labeledciphertext1, labeledciphertext2 CiphertextLabeledciphertext) (CiphertextLabeledciphertext, error) {
 	var labeledciphertextSum CiphertextLabeledciphertext
 
@@ -456,6 +555,16 @@ func SumOverflowCiphertext(params Parameters, labeledciphertext1, labeledciphert
 	return labeledciphertextSum, nil
 }
 
+// RotateColumns rotates the columns of a PlaintextLabeledciphertext by k positions.
+//
+// The algorithm implements:
+//   - Rotates plaintext elements: a ← rotate(a, k)
+//   - Rotates ciphertext: β ← Automorphism(β, k)
+//
+// Note: BGV rotates the two halves of the vector independently. The first half
+// (slots 0 to N/2-1) and second half (slots N/2 to N-1) rotate separately.
+//
+// Requires Galois keys for the rotation element k in the evaluation key set.
 func RotateColumns(params Parameters, labeledciphertext PlaintextLabeledciphertext, k int, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error) {
 	var rotatedCiphertext PlaintextLabeledciphertext
 
@@ -494,6 +603,15 @@ func RotateColumns(params Parameters, labeledciphertext PlaintextLabeledcipherte
 	return rotatedCiphertext, nil
 }
 
+// RotateColumnsOverflow rotates the columns of a CiphertextLabeledciphertext by
+// k positions.
+//
+// The algorithm implements:
+//   - Rotates α: α ← Automorphism(α, k)
+//   - Rotates all β components: βᵢⱼ ← Automorphism(βᵢⱼ, k)
+//
+// Requires Galois keys for the rotation element k in the evaluation key set.
+// Returns a rotated CiphertextLabeledciphertext.
 func RotateColumnsOverflow(params Parameters, labeledciphertext CiphertextLabeledciphertext, k int, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error) {
 	var rotatedCiphertext CiphertextLabeledciphertext
 
@@ -539,6 +657,14 @@ func RotateColumnsOverflow(params Parameters, labeledciphertext CiphertextLabele
 	return rotatedCiphertext, nil
 }
 
+// ApplyEvaluationKey applies an evaluation key to switch the secret key associated
+// with a PlaintextLabeledciphertext.
+//
+// The algorithm applies the key switching operation to the β component, effectively
+// re-encrypting it under a different secret key.
+//
+// This is used in multiparty computation to transfer ciphertext ownership between
+// parties. Returns a new PlaintextLabeledciphertext encrypted under the target key.
 func ApplyEvaluationKey(params Parameters, evalKey rlwe.EvaluationKey, labeledciphertext PlaintextLabeledciphertext) (*PlaintextLabeledciphertext, error) {
 
 	evaluator := bgv.NewEvaluator(params.Parameters, nil)
@@ -553,6 +679,14 @@ func ApplyEvaluationKey(params Parameters, evalKey rlwe.EvaluationKey, labeledci
 	return &labeledciphertext, nil
 }
 
+// ApplyEvaluationKeyOverflow applies an evaluation key to switch the secret key
+// associated with a CiphertextLabeledciphertext.
+//
+// The algorithm applies the key switching operation to:
+//   - α component
+//   - All βᵢⱼ components in the overflow structure
+//
+// Returns a new CiphertextLabeledciphertext encrypted under the target key.
 func ApplyEvaluationKeyOverflow(params Parameters, evalKey rlwe.EvaluationKey, labeledciphertext CiphertextLabeledciphertext) (*CiphertextLabeledciphertext, error) {
 
 	// Aplicar la clave de evaluación sobre elementsA
