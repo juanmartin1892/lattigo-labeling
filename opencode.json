@@ -1,0 +1,38 @@
+{
+  "model": "anthropic/claude-sonnet-4-5",
+  "instructions": [
+    "specs/features/*.md"
+  ],
+  "permissions": {
+    "allow": [
+      "go test *",
+      "go vet *",
+      "go build *",
+      "go fmt *",
+      "git diff *",
+      "git log *",
+      "git status",
+      "git branch *",
+      "git checkout *",
+      "git add *",
+      "git commit *",
+      "git push *",
+      "gh pr create *",
+      "cat *",
+      "ls *",
+      "find *",
+      "grep *",
+      "head *",
+      "tail *",
+      "wc *"
+    ],
+    "ask": [
+      "rm *"
+    ],
+    "deny": [
+      "git merge *",
+      "git push * main"
+    ],
+    "default": "ask"
+  }
+}
