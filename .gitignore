@@ -1,1 +1,38 @@
+# Editor config
 .vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage
+*.coverprofile
+coverage.txt
+coverage.html
+
+# Dependency directories
+vendor/
+
+# Binaries generados por ejemplos
+examples/*/main
+examples/evaluationKeys/evaluationKeys
+examples/rotate/rotate
+examples/rotate-overflow/rotate-overflow
+examples/sum-mult-overflow/sum-mult-overflow
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Archivos temporales
+*.tmp
+*.log

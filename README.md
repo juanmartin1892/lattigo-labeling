@@ -89,9 +89,13 @@ func main() {
     // Multiplicar textos cifrados
     ctMult, _ := labeling.Mult(params, ct1, ct2, pk, evk)
 
-    // Descifrar resultado
-    result, _ := labeling.Decrypt(&params.Parameters, sk, ctSum)
-    log.Printf("Resultado: %v", result)
+    // Descifrar resultado de la suma
+    resultSum, _ := labeling.Decrypt(params, sk, ctSum)
+    log.Printf("Resultado suma: %v", resultSum)
+    
+    // Descifrar resultado de la multiplicación
+    resultMult, _ := labeling.Decrypt(params, sk, ctMult)
+    log.Printf("Resultado multiplicación: %v", resultMult)
 }
 ```
 
@@ -143,8 +147,11 @@ Demuestra rotaciones de columnas en textos cifrados CiphertextLabeledciphertext 
 │   └── sum-mult-overflow/
 │       └── main.go          # Ejemplo de suma y multiplicación con overflow
 ├── go.mod                   # Dependencias del proyecto
+├── go.sum                   # Checksums de dependencias
 └── README.md                # Este archivo
 ```
+
+**Nota sobre Testing**: Las pruebas unitarias están planificadas como trabajo futuro del proyecto. Los ejemplos en la carpeta `examples/` sirven actualmente como validación funcional de las operaciones implementadas.
 
 ## API Principal
 
@@ -156,31 +163,31 @@ Demuestra rotaciones de columnas en textos cifrados CiphertextLabeledciphertext 
 ### Funciones
 
 #### Configuración
-- `NewParametersFromLiteral()`: Crea parámetros del esquema
-- `GenerateKeyPair()`: Genera par de claves (pública/privada)
-- `GenerateRelinearizationKey()`: Genera clave de relinealización
-- `GenerateMemEvaluationKeySet()`: Crea conjunto de claves de evaluación
-- `GenerateGaloisKeys()`: Genera claves de Galois para operaciones de rotación
-- `GenerateMemEvaluationKeySetWithGalois()`: Crea conjunto de claves con claves de Galois
-- `GenerateEvaluationKey()`: Genera clave de evaluación entre dos claves secretas
+- `NewParametersFromLiteral(logN int, LogQ []int, LogP []int, PlaintextModulus uint64) (Parameters, error)`: Crea parámetros del esquema BGV personalizados
+- `GenerateKeyPair(params Parameters) (*rlwe.SecretKey, rlwe.EncryptionKey)`: Genera par de claves (pública/privada)
+- `GenerateRelinearizationKey(params Parameters, sk *rlwe.SecretKey) *rlwe.RelinearizationKey`: Genera clave de relinealización
+- `GenerateMemEvaluationKeySet(rlk *rlwe.RelinearizationKey) *rlwe.MemEvaluationKeySet`: Crea conjunto de claves de evaluación
+- `GenerateGaloisKeys(params Parameters, sk *rlwe.SecretKey, galEls []uint64) []*rlwe.GaloisKey`: Genera claves de Galois para operaciones de rotación
+- `GenerateMemEvaluationKeySetWithGalois(rlk *rlwe.RelinearizationKey, galKeys ...*rlwe.GaloisKey) *rlwe.MemEvaluationKeySet`: Crea conjunto de claves con claves de Galois
+- `GenerateEvaluationKey(params Parameters, skA, skB *rlwe.SecretKey) *rlwe.EvaluationKey`: Genera clave de evaluación entre dos claves secretas
 
 #### Operaciones básicas
-- `Encrypt()`: Cifra un vector de valores
-- `Decrypt()`: Descifra un PlaintextLabeledciphertext
-- `Sum()`: Suma dos PlaintextLabeledciphertext
-- `Mult()`: Multiplica dos PlaintextLabeledciphertext
+- `Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (PlaintextLabeledciphertext, error)`: Cifra un vector de valores
+- `Decrypt(params Parameters, key *rlwe.SecretKey, labeledciphertext PlaintextLabeledciphertext) ([]uint64, error)`: Descifra un PlaintextLabeledciphertext
+- `Sum(params bgv.Parameters, ct1, ct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error)`: Suma dos PlaintextLabeledciphertext
+- `Mult(params Parameters, ct1, ct2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error)`: Multiplica dos PlaintextLabeledciphertext
 
 #### Operaciones avanzadas
-- `RotateColumns()`: Rotación de columnas en PlaintextLabeledciphertext
-- `RotateColumnsOverflow()`: Rotación de columnas en CiphertextLabeledciphertext
-- `ApplyEvaluationKey()`: Aplica clave de evaluación a PlaintextLabeledciphertext
-- `ApplyEvaluationKeyOverflow()`: Aplica clave de evaluación a CiphertextLabeledciphertext
+- `RotateColumns(params Parameters, labeledciphertext PlaintextLabeledciphertext, k int, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error)`: Rotación de columnas en PlaintextLabeledciphertext
+- `RotateColumnsOverflow(params Parameters, labeledciphertext CiphertextLabeledciphertext, k int, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error)`: Rotación de columnas en CiphertextLabeledciphertext
+- `ApplyEvaluationKey(params Parameters, evalKey rlwe.EvaluationKey, labeledciphertext PlaintextLabeledciphertext) (*PlaintextLabeledciphertext, error)`: Aplica clave de evaluación a PlaintextLabeledciphertext
+- `ApplyEvaluationKeyOverflow(params Parameters, evalKey rlwe.EvaluationKey, labeledciphertext CiphertextLabeledciphertext) (*CiphertextLabeledciphertext, error)`: Aplica clave de evaluación a CiphertextLabeledciphertext
 
 #### Operaciones con overflow
-- `MultOverflow()`: Multiplicación que devuelve CiphertextLabeledciphertext
-- `SumOverflow()`: Suma mixta (Ciphertext + Plaintext)
-- `SumOverflowCiphertext()`: Suma entre CiphertextLabeledciphertext
-- `DecryptOverflow()`: Descifra un CiphertextLabeledciphertext
+- `MultOverflow(params Parameters, ct1, ct2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error)`: Multiplicación que devuelve CiphertextLabeledciphertext
+- `SumOverflow(params Parameters, ct1 CiphertextLabeledciphertext, ct2 PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error)`: Suma mixta (Ciphertext + Plaintext)
+- `SumOverflowCiphertext(params Parameters, ct1, ct2 CiphertextLabeledciphertext) (CiphertextLabeledciphertext, error)`: Suma entre CiphertextLabeledciphertext
+- `DecryptOverflow(params Parameters, key *rlwe.SecretKey, labeledciphertext CiphertextLabeledciphertext) ([]uint64, error)`: Descifra un CiphertextLabeledciphertext
 
 ## Ventajas del Labeling
 
