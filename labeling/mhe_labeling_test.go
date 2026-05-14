@@ -8,6 +8,28 @@ import (
 	"github.com/tuneinsight/lattigo/v6/utils/sampling"
 )
 
+// --- Spec 003: Threshold Decryption helpers ---
+
+// genThresholdDecryption simulates the full N-of-N CKS protocol in a single process:
+// each party generates a share, then all shares are aggregated and returned.
+// This is a test helper only; in production each party runs in a separate process.
+func genThresholdDecryption(t *testing.T, ctx MHEContext, skShares []*rlwe.SecretKey, lct PlaintextLabeledciphertext) LabeledDecryptionShare {
+	t.Helper()
+	shares := make([]LabeledDecryptionShare, len(skShares))
+	for i, sk := range skShares {
+		s, err := GenLabeledDecryptionShare(ctx, sk, lct)
+		if err != nil {
+			t.Fatalf("GenLabeledDecryptionShare[%d]: %v", i, err)
+		}
+		shares[i] = s
+	}
+	combined, err := AggregateLabeledDecryptionShares(ctx, shares)
+	if err != nil {
+		t.Fatalf("AggregateLabeledDecryptionShares: %v", err)
+	}
+	return combined
+}
+
 // mhe002CRSSeed is the fixed CRS seed shared by all simulated parties in spec 002 tests.
 var mhe002CRSSeed = []byte("mhe-002-test-crs-seed")
 
@@ -120,6 +142,230 @@ func TestMHEContextCreation(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestGenLabeledDecryptionShare verifies GenLabeledDecryptionShare happy paths and errors.
+func TestGenLabeledDecryptionShare(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("HappyPath", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			nParties int
+		}{
+			{name: "N=1", nParties: 1},
+			{name: "N=2", nParties: 2},
+			{name: "N=3", nParties: 3},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, shares, _ := buildMHETestSetup(t, params, tc.nParties)
+				lct, err := EncryptLabeled(ctx, fillSlots(params, 7))
+				if err != nil {
+					t.Fatalf("EncryptLabeled: %v", err)
+				}
+				_, err = GenLabeledDecryptionShare(ctx, shares[0], lct)
+				if err != nil {
+					t.Fatalf("GenLabeledDecryptionShare: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _ := buildMHETestSetup(t, params, 2)
+		validLct, err := EncryptLabeled(ctx, fillSlots(params, 7))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+
+		cases := []struct {
+			name string
+			sk   *rlwe.SecretKey
+			lct  PlaintextLabeledciphertext
+		}{
+			{
+				name: "nil_sk",
+				sk:   nil,
+				lct:  validLct,
+			},
+			{
+				name: "empty_lct",
+				sk:   rlwe.NewKeyGenerator(params).GenSecretKeyNew(),
+				lct:  PlaintextLabeledciphertext{},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := GenLabeledDecryptionShare(ctx, tc.sk, tc.lct)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestAggregateLabeledDecryptionShares verifies share aggregation happy paths and errors.
+func TestAggregateLabeledDecryptionShares(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("HappyPath", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			nParties int
+		}{
+			{name: "N=1", nParties: 1},
+			{name: "N=2", nParties: 2},
+			{name: "N=3", nParties: 3},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, shares, _ := buildMHETestSetup(t, params, tc.nParties)
+				lct, err := EncryptLabeled(ctx, fillSlots(params, 42))
+				if err != nil {
+					t.Fatalf("EncryptLabeled: %v", err)
+				}
+				decShares := make([]LabeledDecryptionShare, tc.nParties)
+				for i, sk := range shares {
+					decShares[i], err = GenLabeledDecryptionShare(ctx, sk, lct)
+					if err != nil {
+						t.Fatalf("GenLabeledDecryptionShare[%d]: %v", i, err)
+					}
+				}
+				_, err = AggregateLabeledDecryptionShares(ctx, decShares)
+				if err != nil {
+					t.Fatalf("AggregateLabeledDecryptionShares: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _ := buildMHETestSetup(t, params, 2)
+		cases := []struct {
+			name   string
+			shares []LabeledDecryptionShare
+		}{
+			{name: "nil_shares", shares: nil},
+			{name: "empty_shares", shares: []LabeledDecryptionShare{}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := AggregateLabeledDecryptionShares(ctx, tc.shares)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestDecryptThresholdLabeled verifies the full threshold decryption round-trip and errors.
+func TestDecryptThresholdLabeled(t *testing.T) {
+	params := testParameters(t)
+	pt := params.PlaintextModulus()
+
+	t.Run("RoundTrip", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			nParties int
+			value    uint64
+		}{
+			{name: "N=1/value=7", nParties: 1, value: 7},
+			{name: "N=2/value=7", nParties: 2, value: 7},
+			{name: "N=2/value=0", nParties: 2, value: 0},
+			{name: "N=2/value=PT-1", nParties: 2, value: pt - 1},
+			{name: "N=3/value=42", nParties: 3, value: 42},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, shares, _ := buildMHETestSetup(t, params, tc.nParties)
+				values := fillSlots(params, tc.value)
+
+				lct, err := EncryptLabeled(ctx, values)
+				if err != nil {
+					t.Fatalf("EncryptLabeled: %v", err)
+				}
+
+				combined := genThresholdDecryption(t, ctx, shares, lct)
+
+				got, err := DecryptThresholdLabeled(ctx, combined, lct)
+				if err != nil {
+					t.Fatalf("DecryptThresholdLabeled: %v", err)
+				}
+				for i, v := range got {
+					if v != tc.value {
+						t.Errorf("slot %d: got %d, want %d", i, v, tc.value)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, shares, _ := buildMHETestSetup(t, params, 2)
+		validLct, err := EncryptLabeled(ctx, fillSlots(params, 1))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		combined := genThresholdDecryption(t, ctx, shares, validLct)
+
+		_, err = DecryptThresholdLabeled(ctx, combined, PlaintextLabeledciphertext{})
+		if err == nil {
+			t.Fatal("expected error for empty lct, got nil")
+		}
+	})
+}
+
+// TestThresholdDecryptCommutativity verifies that share aggregation order does not affect
+// the decryption result: Aggregate([s0,s1]) and Aggregate([s1,s0]) must decrypt identically.
+func TestThresholdDecryptCommutativity(t *testing.T) {
+	params := testParameters(t)
+	ctx, shares, _ := buildMHETestSetup(t, params, 2)
+	values := fillSlots(params, 77)
+
+	lct, err := EncryptLabeled(ctx, values)
+	if err != nil {
+		t.Fatalf("EncryptLabeled: %v", err)
+	}
+
+	s0, err := GenLabeledDecryptionShare(ctx, shares[0], lct)
+	if err != nil {
+		t.Fatalf("GenLabeledDecryptionShare[0]: %v", err)
+	}
+	s1, err := GenLabeledDecryptionShare(ctx, shares[1], lct)
+	if err != nil {
+		t.Fatalf("GenLabeledDecryptionShare[1]: %v", err)
+	}
+
+	combined01, err := AggregateLabeledDecryptionShares(ctx, []LabeledDecryptionShare{s0, s1})
+	if err != nil {
+		t.Fatalf("Aggregate [s0,s1]: %v", err)
+	}
+	combined10, err := AggregateLabeledDecryptionShares(ctx, []LabeledDecryptionShare{s1, s0})
+	if err != nil {
+		t.Fatalf("Aggregate [s1,s0]: %v", err)
+	}
+
+	got01, err := DecryptThresholdLabeled(ctx, combined01, lct)
+	if err != nil {
+		t.Fatalf("DecryptThresholdLabeled [s0,s1]: %v", err)
+	}
+	got10, err := DecryptThresholdLabeled(ctx, combined10, lct)
+	if err != nil {
+		t.Fatalf("DecryptThresholdLabeled [s1,s0]: %v", err)
+	}
+
+	for i := range got01 {
+		if got01[i] != got10[i] {
+			t.Errorf("slot %d: results differ with different aggregate order: got01=%d, got10=%d",
+				i, got01[i], got10[i])
+		}
+		if got01[i] != values[i] {
+			t.Errorf("slot %d: got %d, want %d", i, got01[i], values[i])
+		}
+	}
 }
 
 // TestEncryptLabeled verifies EncryptLabeled round-trips, randomness, and the
