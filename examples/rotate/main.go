@@ -7,7 +7,7 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/utils/sampling"
-	"main.go/labeling"
+	"github.com/juanmartin1892/lattigo-labeling/labeling"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module main.go
+module github.com/juanmartin1892/lattigo-labeling
 
 go 1.25.1
 
