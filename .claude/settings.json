@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(go build *)",
+      "Bash(go fmt *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git status)",
+      "Bash(git branch *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(gh pr create *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(wc *)"
+    ],
+    "deny": [
+      "Bash(git merge *)",
+      "Bash(git push * main)"
+    ]
+  }
+}
