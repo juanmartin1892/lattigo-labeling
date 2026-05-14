@@ -20,6 +20,8 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/multiparty"
+	"github.com/tuneinsight/lattigo/v6/ring"
+	"github.com/tuneinsight/lattigo/v6/schemes/bgv"
 )
 
 // MHEContext holds the shared parameters and collective public key for an MHE labeling
@@ -89,4 +91,113 @@ func NewMHEContext(params Parameters, skShares []*rlwe.SecretKey, crs multiparty
 // It is semantically equivalent to Encrypt(ctx.Params, ctx.CollectivePK, values).
 func EncryptLabeled(ctx MHEContext, values []uint64) (PlaintextLabeledciphertext, error) {
 	return Encrypt(ctx.Params, ctx.CollectivePK, values)
+}
+
+// smudgingNoise returns the discrete Gaussian noise distribution used for CKS smudging.
+// σ = 8·DefaultNoise following Mouchet et al. 2021 (PETS); NewKeySwitchProtocol combines
+// this with NoiseFreshSK internally.
+func smudgingNoise() ring.DiscreteGaussian {
+	const sigma = 8 * rlwe.DefaultNoise
+	return ring.DiscreteGaussian{Sigma: sigma, Bound: 6 * sigma}
+}
+
+// LabeledDecryptionShare holds one party's key-switch share for the B-component of a
+// PlaintextLabeledciphertext. It is produced by GenLabeledDecryptionShare and consumed
+// by AggregateLabeledDecryptionShares.
+type LabeledDecryptionShare struct {
+	Value multiparty.KeySwitchShare
+}
+
+// GenLabeledDecryptionShare generates party i's collective key-switch share for switching
+// lct.elementsB[0][0] from sk (the party's individual secret key share) to the zero secret
+// key. All N parties must contribute a share before decryption.
+//
+// Noise flooding uses σ = 8·rlwe.DefaultNoise with bound 6σ, following the standard
+// parameter choice from Mouchet et al. 2021 (PETS). NewKeySwitchProtocol combines this
+// with NoiseFreshSK to form the effective smudging standard deviation.
+//
+// Returns an error if sk is nil or if lct contains no ciphertext component.
+func GenLabeledDecryptionShare(ctx MHEContext, sk *rlwe.SecretKey, lct PlaintextLabeledciphertext) (LabeledDecryptionShare, error) {
+	if sk == nil {
+		return LabeledDecryptionShare{}, errors.New("GenLabeledDecryptionShare: sk must not be nil")
+	}
+	if len(lct.elementsB) == 0 || len(lct.elementsB[0]) == 0 {
+		return LabeledDecryptionShare{}, errors.New("GenLabeledDecryptionShare: lct contains no ciphertext component")
+	}
+	β := &lct.elementsB[0][0]
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return LabeledDecryptionShare{}, fmt.Errorf("GenLabeledDecryptionShare: NewKeySwitchProtocol: %w", err)
+	}
+
+	zeroSK := rlwe.NewSecretKey(ctx.Params)
+	share := proto.AllocateShare(β.Level())
+	proto.GenShare(sk, zeroSK, β, &share)
+
+	return LabeledDecryptionShare{Value: share}, nil
+}
+
+// AggregateLabeledDecryptionShares combines all parties' decryption shares into a single
+// combined share that can be passed to DecryptThresholdLabeled.
+//
+// shares must contain at least one element; order does not affect the result (the
+// underlying ring addition is commutative). Returns an error if shares is empty.
+func AggregateLabeledDecryptionShares(ctx MHEContext, shares []LabeledDecryptionShare) (LabeledDecryptionShare, error) {
+	if len(shares) == 0 {
+		return LabeledDecryptionShare{}, errors.New("AggregateLabeledDecryptionShares: shares must not be empty")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return LabeledDecryptionShare{}, fmt.Errorf("AggregateLabeledDecryptionShares: NewKeySwitchProtocol: %w", err)
+	}
+
+	// Allocate a fresh accumulator so no input share's underlying ring.Poly is mutated.
+	// Start by copying shares[0] into it (0 + shares[0] = shares[0]).
+	combined := LabeledDecryptionShare{Value: proto.AllocateShare(shares[0].Value.Level())}
+	for i := range shares {
+		if err := proto.AggregateShares(combined.Value, shares[i].Value, &combined.Value); err != nil {
+			return LabeledDecryptionShare{}, fmt.Errorf("AggregateLabeledDecryptionShares: share %d: %w", i, err)
+		}
+	}
+	return combined, nil
+}
+
+// DecryptThresholdLabeled recovers the plaintext from lct using the combined decryption
+// share produced by AggregateLabeledDecryptionShares. No individual or collective secret
+// key is required at this step.
+//
+// Internally applies KeySwitch to lct.elementsB[0][0] to obtain a ciphertext under the
+// zero secret key, decodes the mask b, then reconstructs m[i] = (elementsA[i] + b[i]) mod T.
+//
+// Returns an error if lct contains no ciphertext component.
+func DecryptThresholdLabeled(ctx MHEContext, combined LabeledDecryptionShare, lct PlaintextLabeledciphertext) ([]uint64, error) {
+	if len(lct.elementsB) == 0 || len(lct.elementsB[0]) == 0 {
+		return nil, errors.New("DecryptThresholdLabeled: lct contains no ciphertext component")
+	}
+	β := &lct.elementsB[0][0]
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return nil, fmt.Errorf("DecryptThresholdLabeled: NewKeySwitchProtocol: %w", err)
+	}
+
+	βSwitched := rlwe.NewCiphertext(ctx.Params, 1, β.Level())
+	proto.KeySwitch(β, combined.Value, βSwitched)
+
+	zeroSK := rlwe.NewSecretKey(ctx.Params)
+	b := make([]uint64, ctx.Params.MaxSlots())
+	if err := bgv.NewEncoder(ctx.Params.Parameters).Decode(
+		rlwe.NewDecryptor(ctx.Params, zeroSK).DecryptNew(βSwitched), b,
+	); err != nil {
+		return nil, fmt.Errorf("DecryptThresholdLabeled: decode: %w", err)
+	}
+
+	T := ctx.Params.PlaintextModulus()
+	result := make([]uint64, len(lct.elementsA))
+	for i, a := range lct.elementsA {
+		result[i] = (a + b[i] + T) % T
+	}
+	return result, nil
 }
