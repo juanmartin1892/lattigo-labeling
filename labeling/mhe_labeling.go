@@ -265,6 +265,70 @@ func MultLabeled(ctx MHEContext, rlk *rlwe.RelinearizationKey, lct1, lct2 Plaint
 	return Mult(ctx.Params, lct1, lct2, ctx.CollectivePK, evk)
 }
 
+// MultOverflowLabeled multiplies two PlaintextLabeledciphertexts encrypted under the same
+// MHEContext collective public key using the overflow technique, returning a
+// CiphertextLabeledciphertext that supports deeper multiplicative depth.
+//
+// The evaluator does not need any secret key share; it uses ctx.CollectivePK for the
+// fresh encryption of the a₁·a₂ component and rlk for the evaluation key set. The
+// overflow formula is:
+//
+//	α = Enc(pk_col, a₁·a₂) + a₁·β₂ + a₂·β₁
+//	elementsB = [β₁, β₂]
+//
+// Returns an error if rlk is nil or if either ciphertext contains no ciphertext component.
+func MultOverflowLabeled(ctx MHEContext, rlk *rlwe.RelinearizationKey, lct1, lct2 PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error) {
+	if rlk == nil {
+		return CiphertextLabeledciphertext{}, errors.New("MultOverflowLabeled: rlk must not be nil")
+	}
+	if len(lct1.elementsB) == 0 || len(lct1.elementsB[0]) == 0 {
+		return CiphertextLabeledciphertext{}, errors.New("MultOverflowLabeled: lct1 contains no ciphertext component")
+	}
+	if len(lct2.elementsB) == 0 || len(lct2.elementsB[0]) == 0 {
+		return CiphertextLabeledciphertext{}, errors.New("MultOverflowLabeled: lct2 contains no ciphertext component")
+	}
+	evk := GenerateMemEvaluationKeySet(rlk)
+	return MultOverflow(ctx.Params, lct1, lct2, ctx.CollectivePK, evk)
+}
+
+// SumOverflowLabeled adds a CiphertextLabeledciphertext and a PlaintextLabeledciphertext
+// encrypted under the same MHEContext, returning a CiphertextLabeledciphertext.
+//
+// The evaluator does not need any secret key share. The algebra is:
+//
+//	α_out = α₁ + a₂   (ciphertext + plaintext addition)
+//	elementsB_out = [β₁…, β₂]  (B components concatenated)
+//
+// Returns an error if either operand contains no ciphertext component.
+func SumOverflowLabeled(ctx MHEContext, clct CiphertextLabeledciphertext, lct PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error) {
+	if clct.elementsA == nil {
+		return CiphertextLabeledciphertext{}, errors.New("SumOverflowLabeled: clct contains no A component")
+	}
+	if len(lct.elementsB) == 0 || len(lct.elementsB[0]) == 0 {
+		return CiphertextLabeledciphertext{}, errors.New("SumOverflowLabeled: lct contains no ciphertext component")
+	}
+	return SumOverflow(ctx.Params, clct, lct)
+}
+
+// SumOverflowCiphertextLabeled adds two CiphertextLabeledciphertexts encrypted under the
+// same MHEContext, returning a CiphertextLabeledciphertext.
+//
+// The evaluator does not need any secret key share. The algebra is:
+//
+//	α_out = α₁ + α₂   (ciphertext addition)
+//	elementsB_out = [β₁…, β₂…]  (all B components concatenated)
+//
+// Returns an error if either operand contains no A component.
+func SumOverflowCiphertextLabeled(ctx MHEContext, clct1, clct2 CiphertextLabeledciphertext) (CiphertextLabeledciphertext, error) {
+	if clct1.elementsA == nil {
+		return CiphertextLabeledciphertext{}, errors.New("SumOverflowCiphertextLabeled: clct1 contains no A component")
+	}
+	if clct2.elementsA == nil {
+		return CiphertextLabeledciphertext{}, errors.New("SumOverflowCiphertextLabeled: clct2 contains no A component")
+	}
+	return SumOverflowCiphertext(ctx.Params, clct1, clct2)
+}
+
 // DecryptThresholdLabeled recovers the plaintext from lct using the combined decryption
 // share produced by AggregateLabeledDecryptionShares. No individual or collective secret
 // key is required at this step.
