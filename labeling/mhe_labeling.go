@@ -164,6 +164,107 @@ func AggregateLabeledDecryptionShares(ctx MHEContext, shares []LabeledDecryption
 	return combined, nil
 }
 
+// GenCollectiveRelinKey runs the two-round collective relinearization key generation
+// protocol for the given secret key shares and CRS, returning the collective
+// relinearization key required by MultLabeled.
+//
+// skShares contains one *rlwe.SecretKey per party, the same shares used in
+// NewMHEContext. crs must be initialised with the same seed on all parties
+// (e.g. sampling.NewKeyedPRNG(sharedSeed)).
+//
+// The collective relinearization key enables relinearization of ciphertexts encrypted
+// under the collective public key without assembling the ideal secret key. It is
+// produced by a two-round interactive protocol: in round one each party contributes a
+// share built from an ephemeral secret key; in round two each party uses the aggregated
+// round-one result to produce their second share.
+//
+// Returns an error if skShares is empty or any element is nil.
+func GenCollectiveRelinKey(params Parameters, skShares []*rlwe.SecretKey, crs multiparty.CRS) (*rlwe.RelinearizationKey, error) {
+	if len(skShares) == 0 {
+		return nil, errors.New("GenCollectiveRelinKey: skShares must not be empty")
+	}
+	for i, sk := range skShares {
+		if sk == nil {
+			return nil, fmt.Errorf("GenCollectiveRelinKey: skShares[%d] is nil", i)
+		}
+	}
+
+	n := len(skShares)
+	protos := make([]multiparty.RelinearizationKeyGenProtocol, n)
+	protos[0] = multiparty.NewRelinearizationKeyGenProtocol(params)
+	for i := 1; i < n; i++ {
+		protos[i] = protos[0].ShallowCopy()
+	}
+
+	crp := protos[0].SampleCRP(crs)
+
+	ephSKs := make([]*rlwe.SecretKey, n)
+	round1 := make([]multiparty.RelinearizationKeyGenShare, n)
+	round2 := make([]multiparty.RelinearizationKeyGenShare, n)
+	for i := range protos {
+		ephSKs[i], round1[i], round2[i] = protos[i].AllocateShare()
+		protos[i].GenShareRoundOne(skShares[i], crp, ephSKs[i], &round1[i])
+	}
+	for i := 1; i < n; i++ {
+		protos[0].AggregateShares(round1[0], round1[i], &round1[0])
+	}
+	for i := range protos {
+		protos[i].GenShareRoundTwo(ephSKs[i], skShares[i], round1[0], &round2[i])
+	}
+	for i := 1; i < n; i++ {
+		protos[0].AggregateShares(round2[0], round2[i], &round2[0])
+	}
+
+	rlk := rlwe.NewRelinearizationKey(params)
+	protos[0].GenRelinearizationKey(round1[0], round2[0], rlk)
+	return rlk, nil
+}
+
+// SumLabeled adds two PlaintextLabeledciphertexts encrypted under the same MHEContext
+// collective public key and returns their labeled sum.
+//
+// The evaluator does not need any secret key share. The algebra is:
+//
+//	elementsA_out = (a1 + a2) mod T
+//	β_out = β1 + β2
+//
+// Returns an error if either ciphertext contains no ciphertext component.
+func SumLabeled(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error) {
+	if len(lct1.elementsB) == 0 || len(lct1.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("SumLabeled: lct1 contains no ciphertext component")
+	}
+	if len(lct2.elementsB) == 0 || len(lct2.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("SumLabeled: lct2 contains no ciphertext component")
+	}
+	return Sum(ctx.Params.Parameters, lct1, lct2)
+}
+
+// MultLabeled multiplies two PlaintextLabeledciphertexts encrypted under the same
+// MHEContext collective public key, using the collective relinearization key for degree
+// reduction after the homomorphic multiplication.
+//
+// The evaluator does not need any secret key share; it uses ctx.CollectivePK for the
+// fresh encryption of the random mask r and rlk for relinearization. The labeling
+// formula is:
+//
+//	a_out = (a1 × a2 − r) mod T
+//	β_out = (β1 × β2) + a1·β2 + a2·β1 + Enc(pk_col, r)
+//
+// Returns an error if rlk is nil or if either ciphertext contains no ciphertext component.
+func MultLabeled(ctx MHEContext, rlk *rlwe.RelinearizationKey, lct1, lct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error) {
+	if rlk == nil {
+		return PlaintextLabeledciphertext{}, errors.New("MultLabeled: rlk must not be nil")
+	}
+	if len(lct1.elementsB) == 0 || len(lct1.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("MultLabeled: lct1 contains no ciphertext component")
+	}
+	if len(lct2.elementsB) == 0 || len(lct2.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("MultLabeled: lct2 contains no ciphertext component")
+	}
+	evk := GenerateMemEvaluationKeySet(rlk)
+	return Mult(ctx.Params, lct1, lct2, ctx.CollectivePK, evk)
+}
+
 // DecryptThresholdLabeled recovers the plaintext from lct using the combined decryption
 // share produced by AggregateLabeledDecryptionShares. No individual or collective secret
 // key is required at this step.
