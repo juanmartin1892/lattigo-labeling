@@ -8,7 +8,351 @@ import (
 	"github.com/tuneinsight/lattigo/v6/utils/sampling"
 )
 
-// --- Spec 003: Threshold Decryption helpers ---
+// --- Homomorphic operations helpers (spec 004) ---
+
+// mheRLKCRSSeed is the fixed CRS seed for collective relinearization key generation
+// tests. Kept separate from mhe002CRSSeed so PKGen and RLK gen each consume an
+// independent PRNG stream.
+var mheRLKCRSSeed = []byte("mhe-rlk-test-crs-seed")
+
+func newMHERLKCRS(t *testing.T) multiparty.CRS {
+	t.Helper()
+	crs, err := sampling.NewKeyedPRNG(mheRLKCRSSeed)
+	if err != nil {
+		t.Fatalf("sampling.NewKeyedPRNG: %v", err)
+	}
+	return crs
+}
+
+// buildMHESetupWithRLK extends buildMHETestSetup by also generating the collective
+// relinearization key required by MultLabeled.
+func buildMHESetupWithRLK(t *testing.T, params Parameters, n int) (MHEContext, []*rlwe.SecretKey, *rlwe.SecretKey, *rlwe.RelinearizationKey) {
+	t.Helper()
+	ctx, shares, skIdeal := buildMHETestSetup(t, params, n)
+	rlk, err := GenCollectiveRelinKey(params, shares, newMHERLKCRS(t))
+	if err != nil {
+		t.Fatalf("GenCollectiveRelinKey: %v", err)
+	}
+	return ctx, shares, skIdeal, rlk
+}
+
+// decryptThreshold is a convenience wrapper that runs the full N-of-N decryption
+// protocol on lct and returns the recovered plaintext slots.
+func decryptThreshold(t *testing.T, ctx MHEContext, shares []*rlwe.SecretKey, lct PlaintextLabeledciphertext) []uint64 {
+	t.Helper()
+	combined := genThresholdDecryption(t, ctx, shares, lct)
+	result, err := DecryptThresholdLabeled(ctx, combined, lct)
+	if err != nil {
+		t.Fatalf("DecryptThresholdLabeled: %v", err)
+	}
+	return result
+}
+
+// TestGenCollectiveRelinKey verifies collective relinearization key generation
+// for various party counts and error conditions (spec 004).
+func TestGenCollectiveRelinKey(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("HappyPath", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			nParties int
+		}{
+			{name: "N=2", nParties: 2},
+			{name: "N=3", nParties: 3},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, shares, _ := buildMHETestSetup(t, params, tc.nParties)
+				rlk, err := GenCollectiveRelinKey(params, shares, newMHERLKCRS(t))
+				if err != nil {
+					t.Fatalf("GenCollectiveRelinKey: %v", err)
+				}
+				if rlk == nil {
+					t.Fatal("returned rlk must not be nil")
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		kgen := rlwe.NewKeyGenerator(params)
+		validSK := kgen.GenSecretKeyNew()
+		validCRS := newMHERLKCRS(t)
+
+		cases := []struct {
+			name     string
+			skShares []*rlwe.SecretKey
+			crs      multiparty.CRS
+		}{
+			{
+				name:     "empty_skShares",
+				skShares: []*rlwe.SecretKey{},
+				crs:      validCRS,
+			},
+			{
+				name:     "nil_skShares",
+				skShares: nil,
+				crs:      validCRS,
+			},
+			{
+				name:     "nil_sk_at_index_0",
+				skShares: []*rlwe.SecretKey{nil},
+				crs:      validCRS,
+			},
+			{
+				name:     "nil_sk_at_index_1",
+				skShares: []*rlwe.SecretKey{validSK, nil},
+				crs:      validCRS,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := GenCollectiveRelinKey(params, tc.skShares, tc.crs)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestSumLabeled verifies SumLabeled round-trips and error conditions (spec 004).
+func TestSumLabeled(t *testing.T) {
+	params := testParameters(t)
+	pt := params.PlaintextModulus()
+
+	t.Run("RoundTrip", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			v1, v2 uint64
+			want   uint64
+		}{
+			{name: "3+4=7", v1: 3, v2: 4, want: 7},
+			{name: "0+0=0", v1: 0, v2: 0, want: 0},
+			{name: "(PT-1)+1=0", v1: pt - 1, v2: 1, want: 0},
+			{name: "10+20=30", v1: 10, v2: 20, want: 30},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, shares, _ := buildMHETestSetup(t, params, 2)
+
+				lct1, err := EncryptLabeled(ctx, fillSlots(params, tc.v1))
+				if err != nil {
+					t.Fatalf("EncryptLabeled lct1: %v", err)
+				}
+				lct2, err := EncryptLabeled(ctx, fillSlots(params, tc.v2))
+				if err != nil {
+					t.Fatalf("EncryptLabeled lct2: %v", err)
+				}
+
+				sum, err := SumLabeled(ctx, lct1, lct2)
+				if err != nil {
+					t.Fatalf("SumLabeled: %v", err)
+				}
+
+				got := decryptThreshold(t, ctx, shares, sum)
+				for i, v := range got {
+					if v != tc.want {
+						t.Errorf("slot %d: got %d, want %d", i, v, tc.want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _ := buildMHETestSetup(t, params, 2)
+		validLct, err := EncryptLabeled(ctx, fillSlots(params, 1))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+
+		cases := []struct {
+			name string
+			lct1 PlaintextLabeledciphertext
+			lct2 PlaintextLabeledciphertext
+		}{
+			{name: "empty_lct1", lct1: PlaintextLabeledciphertext{}, lct2: validLct},
+			{name: "empty_lct2", lct1: validLct, lct2: PlaintextLabeledciphertext{}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := SumLabeled(ctx, tc.lct1, tc.lct2)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestMultLabeled verifies MultLabeled round-trips and error conditions (spec 004).
+func TestMultLabeled(t *testing.T) {
+	params := testParameters(t)
+	pt := params.PlaintextModulus()
+
+	t.Run("RoundTrip", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			v1, v2 uint64
+			want   uint64
+		}{
+			{name: "3x4=12", v1: 3, v2: 4, want: 12},
+			{name: "1x0=0", v1: 1, v2: 0, want: 0},
+			{name: "7x8=56", v1: 7, v2: 8, want: 56},
+			{name: "(PT-1)x2", v1: pt - 1, v2: 2, want: (pt - 1) * 2 % pt},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, 2)
+
+				lct1, err := EncryptLabeled(ctx, fillSlots(params, tc.v1))
+				if err != nil {
+					t.Fatalf("EncryptLabeled lct1: %v", err)
+				}
+				lct2, err := EncryptLabeled(ctx, fillSlots(params, tc.v2))
+				if err != nil {
+					t.Fatalf("EncryptLabeled lct2: %v", err)
+				}
+
+				prod, err := MultLabeled(ctx, rlk, lct1, lct2)
+				if err != nil {
+					t.Fatalf("MultLabeled: %v", err)
+				}
+
+				got := decryptThreshold(t, ctx, shares, prod)
+				for i, v := range got {
+					if v != tc.want {
+						t.Errorf("slot %d: got %d, want %d", i, v, tc.want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _, rlk := buildMHESetupWithRLK(t, params, 2)
+		validLct, err := EncryptLabeled(ctx, fillSlots(params, 3))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+
+		cases := []struct {
+			name string
+			rlk  *rlwe.RelinearizationKey
+			lct1 PlaintextLabeledciphertext
+			lct2 PlaintextLabeledciphertext
+		}{
+			{name: "nil_rlk", rlk: nil, lct1: validLct, lct2: validLct},
+			{name: "empty_lct1", rlk: rlk, lct1: PlaintextLabeledciphertext{}, lct2: validLct},
+			{name: "empty_lct2", rlk: rlk, lct1: validLct, lct2: PlaintextLabeledciphertext{}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := MultLabeled(ctx, tc.rlk, tc.lct1, tc.lct2)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestSumLabeledCommutativity verifies that SumLabeled(a, b) and SumLabeled(b, a)
+// decrypt to the same result (spec 004).
+func TestSumLabeledCommutativity(t *testing.T) {
+	params := testParameters(t)
+	ctx, shares, _ := buildMHETestSetup(t, params, 2)
+
+	lct1, err := EncryptLabeled(ctx, fillSlots(params, 13))
+	if err != nil {
+		t.Fatalf("EncryptLabeled lct1: %v", err)
+	}
+	lct2, err := EncryptLabeled(ctx, fillSlots(params, 29))
+	if err != nil {
+		t.Fatalf("EncryptLabeled lct2: %v", err)
+	}
+
+	sum12, err := SumLabeled(ctx, lct1, lct2)
+	if err != nil {
+		t.Fatalf("SumLabeled(lct1,lct2): %v", err)
+	}
+	sum21, err := SumLabeled(ctx, lct2, lct1)
+	if err != nil {
+		t.Fatalf("SumLabeled(lct2,lct1): %v", err)
+	}
+
+	got12 := decryptThreshold(t, ctx, shares, sum12)
+	got21 := decryptThreshold(t, ctx, shares, sum21)
+
+	for i := range got12 {
+		if got12[i] != got21[i] {
+			t.Errorf("slot %d: Sum(a,b)=%d != Sum(b,a)=%d", i, got12[i], got21[i])
+		}
+		if got12[i] != 42 {
+			t.Errorf("slot %d: got %d, want 42", i, got12[i])
+		}
+	}
+}
+
+// TestMHEHomomorphicOpsN3 verifies SumLabeled and MultLabeled with three parties
+// to confirm the collective key protocol scales correctly (spec 004).
+func TestMHEHomomorphicOpsN3(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("Sum", func(t *testing.T) {
+		ctx, shares, _ := buildMHETestSetup(t, params, 3)
+
+		lct1, err := EncryptLabeled(ctx, fillSlots(params, 5))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct1: %v", err)
+		}
+		lct2, err := EncryptLabeled(ctx, fillSlots(params, 6))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct2: %v", err)
+		}
+
+		sum, err := SumLabeled(ctx, lct1, lct2)
+		if err != nil {
+			t.Fatalf("SumLabeled: %v", err)
+		}
+
+		got := decryptThreshold(t, ctx, shares, sum)
+		for i, v := range got {
+			if v != 11 {
+				t.Errorf("slot %d: got %d, want 11", i, v)
+			}
+		}
+	})
+
+	t.Run("Mult", func(t *testing.T) {
+		ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, 3)
+
+		lct1, err := EncryptLabeled(ctx, fillSlots(params, 5))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct1: %v", err)
+		}
+		lct2, err := EncryptLabeled(ctx, fillSlots(params, 6))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct2: %v", err)
+		}
+
+		prod, err := MultLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultLabeled: %v", err)
+		}
+
+		got := decryptThreshold(t, ctx, shares, prod)
+		for i, v := range got {
+			if v != 30 {
+				t.Errorf("slot %d: got %d, want 30", i, v)
+			}
+		}
+	})
+}
+
+// --- Threshold Decryption helpers ---
 
 // genThresholdDecryption simulates the full N-of-N CKS protocol in a single process:
 // each party generates a share, then all shares are aggregated and returned.
@@ -30,7 +374,7 @@ func genThresholdDecryption(t *testing.T, ctx MHEContext, skShares []*rlwe.Secre
 	return combined
 }
 
-// mhe002CRSSeed is the fixed CRS seed shared by all simulated parties in spec 002 tests.
+// mhe002CRSSeed is the fixed CRS seed for public key generation tests.
 var mhe002CRSSeed = []byte("mhe-002-test-crs-seed")
 
 func newMHE002CRS(t *testing.T) multiparty.CRS {
