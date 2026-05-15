@@ -1090,3 +1090,326 @@ func TestOverflowOpsN3(t *testing.T) {
 		}
 	}
 }
+
+// --- Spec 006: Threshold Decryption of Overflow Ciphertexts ---
+
+// genOverflowThresholdDecryption simulates the full N-of-N CKS protocol for a
+// CiphertextLabeledciphertext in a single process: each party generates an
+// OverflowDecryptionShare, all shares are aggregated, and the combined share is returned.
+// Production code runs each party's step in a separate process.
+func genOverflowThresholdDecryption(t *testing.T, ctx MHEContext, skShares []*rlwe.SecretKey, clct CiphertextLabeledciphertext) OverflowDecryptionShare {
+	t.Helper()
+	shares := make([]OverflowDecryptionShare, len(skShares))
+	for i, sk := range skShares {
+		s, err := GenOverflowDecryptionShare(ctx, sk, clct)
+		if err != nil {
+			t.Fatalf("GenOverflowDecryptionShare[%d]: %v", i, err)
+		}
+		shares[i] = s
+	}
+	combined, err := AggregateOverflowDecryptionShares(ctx, shares)
+	if err != nil {
+		t.Fatalf("AggregateOverflowDecryptionShares: %v", err)
+	}
+	return combined
+}
+
+// TestGenOverflowDecryptionShare verifies GenOverflowDecryptionShare happy paths and errors.
+func TestGenOverflowDecryptionShare(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("HappyPath", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			nParties int
+		}{
+			{name: "N=1", nParties: 1},
+			{name: "N=2", nParties: 2},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, tc.nParties)
+				lct1, err := EncryptLabeled(ctx, fillSlots(params, 3))
+				if err != nil {
+					t.Fatalf("EncryptLabeled: %v", err)
+				}
+				lct2, err := EncryptLabeled(ctx, fillSlots(params, 4))
+				if err != nil {
+					t.Fatalf("EncryptLabeled: %v", err)
+				}
+				clct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+				if err != nil {
+					t.Fatalf("MultOverflowLabeled: %v", err)
+				}
+				_, err = GenOverflowDecryptionShare(ctx, shares[0], clct)
+				if err != nil {
+					t.Fatalf("GenOverflowDecryptionShare: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _, rlk := buildMHESetupWithRLK(t, params, 2)
+		lct1, err := EncryptLabeled(ctx, fillSlots(params, 3))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		lct2, err := EncryptLabeled(ctx, fillSlots(params, 4))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		validClct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled: %v", err)
+		}
+
+		cases := []struct {
+			name string
+			sk   *rlwe.SecretKey
+			clct CiphertextLabeledciphertext
+		}{
+			{name: "nil_sk", sk: nil, clct: validClct},
+			{name: "empty_clct", sk: rlwe.NewKeyGenerator(params).GenSecretKeyNew(), clct: CiphertextLabeledciphertext{}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := GenOverflowDecryptionShare(ctx, tc.sk, tc.clct)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestAggregateOverflowDecryptionShares verifies share aggregation happy paths and errors.
+func TestAggregateOverflowDecryptionShares(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("HappyPath", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			nParties int
+		}{
+			{name: "N=2", nParties: 2},
+			{name: "N=3", nParties: 3},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, tc.nParties)
+				lct1, err := EncryptLabeled(ctx, fillSlots(params, 5))
+				if err != nil {
+					t.Fatalf("EncryptLabeled: %v", err)
+				}
+				lct2, err := EncryptLabeled(ctx, fillSlots(params, 6))
+				if err != nil {
+					t.Fatalf("EncryptLabeled: %v", err)
+				}
+				clct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+				if err != nil {
+					t.Fatalf("MultOverflowLabeled: %v", err)
+				}
+				decShares := make([]OverflowDecryptionShare, tc.nParties)
+				for i, sk := range shares {
+					decShares[i], err = GenOverflowDecryptionShare(ctx, sk, clct)
+					if err != nil {
+						t.Fatalf("GenOverflowDecryptionShare[%d]: %v", i, err)
+					}
+				}
+				_, err = AggregateOverflowDecryptionShares(ctx, decShares)
+				if err != nil {
+					t.Fatalf("AggregateOverflowDecryptionShares: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _, _ := buildMHESetupWithRLK(t, params, 2)
+		cases := []struct {
+			name   string
+			shares []OverflowDecryptionShare
+		}{
+			{name: "nil_shares", shares: nil},
+			{name: "empty_shares", shares: []OverflowDecryptionShare{}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := AggregateOverflowDecryptionShares(ctx, tc.shares)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestDecryptThresholdOverflow verifies the full threshold decryption round-trip for
+// CiphertextLabeledciphertexts produced by overflow operations.
+func TestDecryptThresholdOverflow(t *testing.T) {
+	params := testParameters(t)
+	pt := params.PlaintextModulus()
+
+	t.Run("MultOnly", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			m1, m2 uint64
+			want   uint64
+		}{
+			{name: "3x4=12", m1: 3, m2: 4, want: 12},
+			{name: "1x0=0", m1: 1, m2: 0, want: 0},
+			{name: "(PT-1)x2", m1: pt - 1, m2: 2, want: (pt - 1) * 2 % pt},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, 2)
+				lct1, err := EncryptLabeled(ctx, fillSlots(params, tc.m1))
+				if err != nil {
+					t.Fatalf("EncryptLabeled lct1: %v", err)
+				}
+				lct2, err := EncryptLabeled(ctx, fillSlots(params, tc.m2))
+				if err != nil {
+					t.Fatalf("EncryptLabeled lct2: %v", err)
+				}
+				clct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+				if err != nil {
+					t.Fatalf("MultOverflowLabeled: %v", err)
+				}
+				combined := genOverflowThresholdDecryption(t, ctx, shares, clct)
+				got, err := DecryptThresholdOverflow(ctx, combined, clct)
+				if err != nil {
+					t.Fatalf("DecryptThresholdOverflow: %v", err)
+				}
+				for i, v := range got {
+					if v != tc.want {
+						t.Errorf("slot %d: got %d, want %d", i, v, tc.want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("WithSum", func(t *testing.T) {
+		// MultOverflow([3],[4]) + SumOverflow([5]) → [17]
+		ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, 2)
+		lct1, _ := EncryptLabeled(ctx, fillSlots(params, 3))
+		lct2, _ := EncryptLabeled(ctx, fillSlots(params, 4))
+		lct3, _ := EncryptLabeled(ctx, fillSlots(params, 5))
+
+		clct12, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled: %v", err)
+		}
+		clctSum, err := SumOverflowLabeled(ctx, clct12, lct3)
+		if err != nil {
+			t.Fatalf("SumOverflowLabeled: %v", err)
+		}
+		combined := genOverflowThresholdDecryption(t, ctx, shares, clctSum)
+		got, err := DecryptThresholdOverflow(ctx, combined, clctSum)
+		if err != nil {
+			t.Fatalf("DecryptThresholdOverflow: %v", err)
+		}
+		for i, v := range got {
+			if v != 17 {
+				t.Errorf("slot %d: got %d, want 17", i, v)
+			}
+		}
+	})
+
+	t.Run("SumOfMults", func(t *testing.T) {
+		// MultOverflow([3],[4]) + MultOverflow([2],[5]) → SumOverflowCiphertext → [22]
+		ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, 2)
+		lct1, _ := EncryptLabeled(ctx, fillSlots(params, 3))
+		lct2, _ := EncryptLabeled(ctx, fillSlots(params, 4))
+		lct3, _ := EncryptLabeled(ctx, fillSlots(params, 2))
+		lct4, _ := EncryptLabeled(ctx, fillSlots(params, 5))
+
+		clct12, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled(3,4): %v", err)
+		}
+		clct34, err := MultOverflowLabeled(ctx, rlk, lct3, lct4)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled(2,5): %v", err)
+		}
+		clctFinal, err := SumOverflowCiphertextLabeled(ctx, clct12, clct34)
+		if err != nil {
+			t.Fatalf("SumOverflowCiphertextLabeled: %v", err)
+		}
+		combined := genOverflowThresholdDecryption(t, ctx, shares, clctFinal)
+		got, err := DecryptThresholdOverflow(ctx, combined, clctFinal)
+		if err != nil {
+			t.Fatalf("DecryptThresholdOverflow: %v", err)
+		}
+		for i, v := range got {
+			if v != 22 {
+				t.Errorf("slot %d: got %d, want 22", i, v)
+			}
+		}
+	})
+
+	t.Run("N3", func(t *testing.T) {
+		// Three parties: MultOverflow([6],[7]) = [42]
+		ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, 3)
+		lct1, _ := EncryptLabeled(ctx, fillSlots(params, 6))
+		lct2, _ := EncryptLabeled(ctx, fillSlots(params, 7))
+
+		clct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled N=3: %v", err)
+		}
+		combined := genOverflowThresholdDecryption(t, ctx, shares, clct)
+		got, err := DecryptThresholdOverflow(ctx, combined, clct)
+		if err != nil {
+			t.Fatalf("DecryptThresholdOverflow N=3: %v", err)
+		}
+		for i, v := range got {
+			if v != 42 {
+				t.Errorf("slot %d: got %d, want 42", i, v)
+			}
+		}
+	})
+
+	t.Run("Consistency", func(t *testing.T) {
+		// DecryptThresholdOverflow and DecryptOverflow(skIdeal) must agree.
+		ctx, shares, skIdeal, rlk := buildMHESetupWithRLK(t, params, 2)
+		lct1, _ := EncryptLabeled(ctx, fillSlots(params, 9))
+		lct2, _ := EncryptLabeled(ctx, fillSlots(params, 7))
+
+		clct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled: %v", err)
+		}
+		want, err := DecryptOverflow(params, skIdeal, clct)
+		if err != nil {
+			t.Fatalf("DecryptOverflow oracle: %v", err)
+		}
+		combined := genOverflowThresholdDecryption(t, ctx, shares, clct)
+		got, err := DecryptThresholdOverflow(ctx, combined, clct)
+		if err != nil {
+			t.Fatalf("DecryptThresholdOverflow: %v", err)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("slot %d: threshold=%d, oracle=%d", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, shares, _, rlk := buildMHESetupWithRLK(t, params, 2)
+		lct1, _ := EncryptLabeled(ctx, fillSlots(params, 1))
+		lct2, _ := EncryptLabeled(ctx, fillSlots(params, 2))
+		validClct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled: %v", err)
+		}
+		combined := genOverflowThresholdDecryption(t, ctx, shares, validClct)
+
+		_, err = DecryptThresholdOverflow(ctx, combined, CiphertextLabeledciphertext{})
+		if err == nil {
+			t.Fatal("expected error for empty clct, got nil")
+		}
+	})
+}

@@ -366,3 +366,158 @@ func DecryptThresholdLabeled(ctx MHEContext, combined LabeledDecryptionShare, lc
 	}
 	return result, nil
 }
+
+// OverflowDecryptionShare holds one party's collective key-switch shares for all
+// ciphertext components of a CiphertextLabeledciphertext: one share for the α component
+// (elementsA) and one share per β_ij component (elementsB[i][j]).
+//
+// The shape of Betas mirrors the corresponding CiphertextLabeledciphertext:
+// Betas[i][j] corresponds to elementsB[i][j].
+type OverflowDecryptionShare struct {
+	Alpha LabeledDecryptionShare
+	Betas [][]LabeledDecryptionShare
+}
+
+// GenOverflowDecryptionShare generates party i's CKS shares for all ciphertext components
+// of clct: one share for α (elementsA) and one per β_ij (elementsB[i][j]).
+//
+// Uses the same smudging noise as GenLabeledDecryptionShare (σ = 8·rlwe.DefaultNoise).
+//
+// Returns an error if sk is nil or if clct contains no A component (α).
+func GenOverflowDecryptionShare(ctx MHEContext, sk *rlwe.SecretKey, clct CiphertextLabeledciphertext) (OverflowDecryptionShare, error) {
+	if sk == nil {
+		return OverflowDecryptionShare{}, errors.New("GenOverflowDecryptionShare: sk must not be nil")
+	}
+	if clct.elementsA == nil {
+		return OverflowDecryptionShare{}, errors.New("GenOverflowDecryptionShare: clct contains no A component")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return OverflowDecryptionShare{}, fmt.Errorf("GenOverflowDecryptionShare: NewKeySwitchProtocol: %w", err)
+	}
+	zeroSK := rlwe.NewSecretKey(ctx.Params)
+
+	α := (*rlwe.Ciphertext)(clct.elementsA)
+	alphaShare := proto.AllocateShare(α.Level())
+	proto.GenShare(sk, zeroSK, α, &alphaShare)
+
+	betas := make([][]LabeledDecryptionShare, len(clct.elementsB))
+	for i, row := range clct.elementsB {
+		betas[i] = make([]LabeledDecryptionShare, len(row))
+		for j := range row {
+			β := &clct.elementsB[i][j]
+			s := proto.AllocateShare(β.Level())
+			proto.GenShare(sk, zeroSK, β, &s)
+			betas[i][j] = LabeledDecryptionShare{Value: s}
+		}
+	}
+
+	return OverflowDecryptionShare{
+		Alpha: LabeledDecryptionShare{Value: alphaShare},
+		Betas: betas,
+	}, nil
+}
+
+// AggregateOverflowDecryptionShares combines all parties' OverflowDecryptionShares into a
+// single combined share for use in DecryptThresholdOverflow.
+//
+// All input shares must have the same Betas shape. Returns an error if shares is empty.
+func AggregateOverflowDecryptionShares(ctx MHEContext, shares []OverflowDecryptionShare) (OverflowDecryptionShare, error) {
+	if len(shares) == 0 {
+		return OverflowDecryptionShare{}, errors.New("AggregateOverflowDecryptionShares: shares must not be empty")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return OverflowDecryptionShare{}, fmt.Errorf("AggregateOverflowDecryptionShares: NewKeySwitchProtocol: %w", err)
+	}
+
+	// Fresh accumulator for Alpha (avoids mutating input ring.Poly slices).
+	combinedAlpha := LabeledDecryptionShare{Value: proto.AllocateShare(shares[0].Alpha.Value.Level())}
+	for _, s := range shares {
+		if err := proto.AggregateShares(combinedAlpha.Value, s.Alpha.Value, &combinedAlpha.Value); err != nil {
+			return OverflowDecryptionShare{}, fmt.Errorf("AggregateOverflowDecryptionShares: alpha: %w", err)
+		}
+	}
+
+	// Fresh accumulators for each Betas[i][j].
+	combinedBetas := make([][]LabeledDecryptionShare, len(shares[0].Betas))
+	for i, row := range shares[0].Betas {
+		combinedBetas[i] = make([]LabeledDecryptionShare, len(row))
+		for j := range row {
+			combinedBetas[i][j] = LabeledDecryptionShare{Value: proto.AllocateShare(shares[0].Betas[i][j].Value.Level())}
+			for _, s := range shares {
+				if err := proto.AggregateShares(combinedBetas[i][j].Value, s.Betas[i][j].Value, &combinedBetas[i][j].Value); err != nil {
+					return OverflowDecryptionShare{}, fmt.Errorf("AggregateOverflowDecryptionShares: beta[%d][%d]: %w", i, j, err)
+				}
+			}
+		}
+	}
+
+	return OverflowDecryptionShare{Alpha: combinedAlpha, Betas: combinedBetas}, nil
+}
+
+// DecryptThresholdOverflow recovers the plaintext from clct using the combined
+// OverflowDecryptionShare produced by AggregateOverflowDecryptionShares.
+// No individual or collective secret key is required at this step.
+//
+// Applies CKS to each ciphertext component and reconstructs:
+//
+//	m[k] = (plainAlpha[k] + Σᵢ ∏ⱼ plainBeta_ij[k]) mod T
+//
+// Returns an error if clct contains no A component.
+func DecryptThresholdOverflow(ctx MHEContext, combined OverflowDecryptionShare, clct CiphertextLabeledciphertext) ([]uint64, error) {
+	if clct.elementsA == nil {
+		return nil, errors.New("DecryptThresholdOverflow: clct contains no A component")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return nil, fmt.Errorf("DecryptThresholdOverflow: NewKeySwitchProtocol: %w", err)
+	}
+
+	encoder := bgv.NewEncoder(ctx.Params.Parameters)
+	zeroSK := rlwe.NewSecretKey(ctx.Params)
+	dec := rlwe.NewDecryptor(ctx.Params, zeroSK)
+
+	switchAndDecode := func(ct *rlwe.Ciphertext, share LabeledDecryptionShare) ([]uint64, error) {
+		ctSwitched := rlwe.NewCiphertext(ctx.Params, 1, ct.Level())
+		proto.KeySwitch(ct, share.Value, ctSwitched)
+		out := make([]uint64, ctx.Params.MaxSlots())
+		return out, encoder.Decode(dec.DecryptNew(ctSwitched), out)
+	}
+
+	α := (*rlwe.Ciphertext)(clct.elementsA)
+	plainAlpha, err := switchAndDecode(α, combined.Alpha)
+	if err != nil {
+		return nil, fmt.Errorf("DecryptThresholdOverflow: decode α: %w", err)
+	}
+
+	T := ctx.Params.PlaintextModulus()
+	sumBetas := make([]uint64, ctx.Params.MaxSlots())
+	for i, row := range clct.elementsB {
+		multBetas := make([]uint64, ctx.Params.MaxSlots())
+		for k := range multBetas {
+			multBetas[k] = 1
+		}
+		for j := range row {
+			plainBeta, err := switchAndDecode(&clct.elementsB[i][j], combined.Betas[i][j])
+			if err != nil {
+				return nil, fmt.Errorf("DecryptThresholdOverflow: decode β[%d][%d]: %w", i, j, err)
+			}
+			for k := range multBetas {
+				multBetas[k] = (multBetas[k] * plainBeta[k]) % T
+			}
+		}
+		for k := range sumBetas {
+			sumBetas[k] = (sumBetas[k] + multBetas[k]) % T
+		}
+	}
+
+	result := make([]uint64, ctx.Params.MaxSlots())
+	for k := range result {
+		result[k] = (plainAlpha[k] + sumBetas[k] + T) % T
+	}
+	return result, nil
+}
