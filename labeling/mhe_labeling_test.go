@@ -804,3 +804,289 @@ func TestEncryptLabeled(t *testing.T) {
 		}
 	})
 }
+
+// --- Spec 005: Overflow Operations ---
+
+// decryptOverflowOracle runs DecryptOverflow(skIdeal, clct) and fails the test on error.
+// skIdeal is assembled only in the test context; production code never assembles it.
+func decryptOverflowOracle(t *testing.T, params Parameters, skIdeal *rlwe.SecretKey, clct CiphertextLabeledciphertext) []uint64 {
+	t.Helper()
+	got, err := DecryptOverflow(params, skIdeal, clct)
+	if err != nil {
+		t.Fatalf("DecryptOverflow: %v", err)
+	}
+	return got
+}
+
+// TestMultOverflowLabeled verifies MultOverflowLabeled round-trips and error conditions.
+func TestMultOverflowLabeled(t *testing.T) {
+	params := testParameters(t)
+	pt := params.PlaintextModulus()
+
+	t.Run("RoundTrip", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			m1, m2 uint64
+			want   uint64
+		}{
+			{name: "3x4", m1: 3, m2: 4, want: 12},
+			{name: "1x0", m1: 1, m2: 0, want: 0},
+			{name: "(PT-1)x2", m1: pt - 1, m2: 2, want: (pt - 1) * 2 % pt},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, _, skIdeal, rlk := buildMHESetupWithRLK(t, params, 2)
+
+				lct1, err := EncryptLabeled(ctx, fillSlots(params, tc.m1))
+				if err != nil {
+					t.Fatalf("EncryptLabeled lct1: %v", err)
+				}
+				lct2, err := EncryptLabeled(ctx, fillSlots(params, tc.m2))
+				if err != nil {
+					t.Fatalf("EncryptLabeled lct2: %v", err)
+				}
+
+				clct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+				if err != nil {
+					t.Fatalf("MultOverflowLabeled: %v", err)
+				}
+
+				got := decryptOverflowOracle(t, params, skIdeal, clct)
+				for i, v := range got {
+					if v != tc.want {
+						t.Errorf("slot %d: got %d, want %d", i, v, tc.want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _, rlk := buildMHESetupWithRLK(t, params, 2)
+		validLct, err := EncryptLabeled(ctx, fillSlots(params, 3))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		emptyLct := PlaintextLabeledciphertext{}
+
+		cases := []struct {
+			name string
+			rlk  *rlwe.RelinearizationKey
+			lct1 PlaintextLabeledciphertext
+			lct2 PlaintextLabeledciphertext
+		}{
+			{name: "nil_rlk", rlk: nil, lct1: validLct, lct2: validLct},
+			{name: "empty_lct1", rlk: rlk, lct1: emptyLct, lct2: validLct},
+			{name: "empty_lct2", rlk: rlk, lct1: validLct, lct2: emptyLct},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := MultOverflowLabeled(ctx, tc.rlk, tc.lct1, tc.lct2)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestSumOverflowLabeled verifies SumOverflowLabeled round-trips and error conditions.
+func TestSumOverflowLabeled(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("RoundTrip", func(t *testing.T) {
+		// MultOverflow([3],[4]) + SumOverflow([5]) → [3×4+5] = [17]
+		ctx, _, skIdeal, rlk := buildMHESetupWithRLK(t, params, 2)
+
+		lct1, err := EncryptLabeled(ctx, fillSlots(params, 3))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct1: %v", err)
+		}
+		lct2, err := EncryptLabeled(ctx, fillSlots(params, 4))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct2: %v", err)
+		}
+		lct3, err := EncryptLabeled(ctx, fillSlots(params, 5))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct3: %v", err)
+		}
+
+		clct12, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled: %v", err)
+		}
+
+		clctSum, err := SumOverflowLabeled(ctx, clct12, lct3)
+		if err != nil {
+			t.Fatalf("SumOverflowLabeled: %v", err)
+		}
+
+		got := decryptOverflowOracle(t, params, skIdeal, clctSum)
+		for i, v := range got {
+			if v != 17 {
+				t.Errorf("slot %d: got %d, want 17", i, v)
+			}
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _, rlk := buildMHESetupWithRLK(t, params, 2)
+		validLct, err := EncryptLabeled(ctx, fillSlots(params, 5))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		lct2, err := EncryptLabeled(ctx, fillSlots(params, 4))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct2: %v", err)
+		}
+		validClct, err := MultOverflowLabeled(ctx, rlk, validLct, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled: %v", err)
+		}
+
+		emptyLct := PlaintextLabeledciphertext{}
+		emptyClct := CiphertextLabeledciphertext{}
+
+		cases := []struct {
+			name string
+			clct CiphertextLabeledciphertext
+			lct  PlaintextLabeledciphertext
+		}{
+			{name: "empty_clct", clct: emptyClct, lct: validLct},
+			{name: "empty_lct", clct: validClct, lct: emptyLct},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := SumOverflowLabeled(ctx, tc.clct, tc.lct)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestSumOverflowCiphertextLabeled verifies SumOverflowCiphertextLabeled round-trips and errors.
+func TestSumOverflowCiphertextLabeled(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("RoundTrip", func(t *testing.T) {
+		// MultOverflow([3],[4]) + MultOverflow([2],[5]) → SumOverflowCiphertext → [12+10] = [22]
+		ctx, _, skIdeal, rlk := buildMHESetupWithRLK(t, params, 2)
+
+		lct1, err := EncryptLabeled(ctx, fillSlots(params, 3))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct1: %v", err)
+		}
+		lct2, err := EncryptLabeled(ctx, fillSlots(params, 4))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct2: %v", err)
+		}
+		lct3, err := EncryptLabeled(ctx, fillSlots(params, 2))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct3: %v", err)
+		}
+		lct4, err := EncryptLabeled(ctx, fillSlots(params, 5))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lct4: %v", err)
+		}
+
+		clct12, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled(3,4): %v", err)
+		}
+		clct34, err := MultOverflowLabeled(ctx, rlk, lct3, lct4)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled(2,5): %v", err)
+		}
+
+		clctSum, err := SumOverflowCiphertextLabeled(ctx, clct12, clct34)
+		if err != nil {
+			t.Fatalf("SumOverflowCiphertextLabeled: %v", err)
+		}
+
+		got := decryptOverflowOracle(t, params, skIdeal, clctSum)
+		for i, v := range got {
+			if v != 22 {
+				t.Errorf("slot %d: got %d, want 22", i, v)
+			}
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, _, _, rlk := buildMHESetupWithRLK(t, params, 2)
+		lctA, err := EncryptLabeled(ctx, fillSlots(params, 3))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lctA: %v", err)
+		}
+		lctB, err := EncryptLabeled(ctx, fillSlots(params, 4))
+		if err != nil {
+			t.Fatalf("EncryptLabeled lctB: %v", err)
+		}
+		validClct, err := MultOverflowLabeled(ctx, rlk, lctA, lctB)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeled: %v", err)
+		}
+		emptyClct := CiphertextLabeledciphertext{}
+
+		cases := []struct {
+			name  string
+			clct1 CiphertextLabeledciphertext
+			clct2 CiphertextLabeledciphertext
+		}{
+			{name: "empty_clct1", clct1: emptyClct, clct2: validClct},
+			{name: "empty_clct2", clct1: validClct, clct2: emptyClct},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := SumOverflowCiphertextLabeled(ctx, tc.clct1, tc.clct2)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestOverflowOpsN3 verifies MultOverflowLabeled and SumOverflowLabeled with three parties.
+func TestOverflowOpsN3(t *testing.T) {
+	params := testParameters(t)
+	ctx, _, skIdeal, rlk := buildMHESetupWithRLK(t, params, 3)
+
+	lct1, err := EncryptLabeled(ctx, fillSlots(params, 6))
+	if err != nil {
+		t.Fatalf("EncryptLabeled lct1: %v", err)
+	}
+	lct2, err := EncryptLabeled(ctx, fillSlots(params, 7))
+	if err != nil {
+		t.Fatalf("EncryptLabeled lct2: %v", err)
+	}
+	lct3, err := EncryptLabeled(ctx, fillSlots(params, 2))
+	if err != nil {
+		t.Fatalf("EncryptLabeled lct3: %v", err)
+	}
+
+	// MultOverflow([6],[7]) = [42]
+	clct, err := MultOverflowLabeled(ctx, rlk, lct1, lct2)
+	if err != nil {
+		t.Fatalf("MultOverflowLabeled N=3: %v", err)
+	}
+	got := decryptOverflowOracle(t, params, skIdeal, clct)
+	for i, v := range got {
+		if v != 42 {
+			t.Errorf("MultOverflowLabeled N=3: slot %d: got %d, want 42", i, v)
+		}
+	}
+
+	// SumOverflow([42_clct], [2]) = [44]
+	clctSum, err := SumOverflowLabeled(ctx, clct, lct3)
+	if err != nil {
+		t.Fatalf("SumOverflowLabeled N=3: %v", err)
+	}
+	got = decryptOverflowOracle(t, params, skIdeal, clctSum)
+	for i, v := range got {
+		if v != 44 {
+			t.Errorf("SumOverflowLabeled N=3: slot %d: got %d, want 44", i, v)
+		}
+	}
+}
