@@ -69,6 +69,7 @@ func main() {
 	fmt.Printf("  LogN=%d  slots=%d  PlaintextModulus=0x%x\n",
 		params.LogN(), params.MaxSlots(), params.PlaintextModulus())
 
+	// Each party generates its secret key share. No party holds the ideal secret key.
 	nParties := 2
 	kgen := rlwe.NewKeyGenerator(params)
 	skShares := make([]*rlwe.SecretKey, nParties)
@@ -77,11 +78,13 @@ func main() {
 		fmt.Printf("  P%d: secret key share generated\n", i+1)
 	}
 
+	// All parties derive the same Common Reference String (CRS) from the fixed seed.
 	crs, err := sampling.NewKeyedPRNG(fixedCRSSeed)
 	if err != nil {
 		log.Fatalf("NewKeyedPRNG: %v", err)
 	}
 
+	// MHEContext derives the collective public key from the secret key shares and CRS.
 	ctx, err := labeling.NewMHEContext(params, skShares, crs)
 	if err != nil {
 		log.Fatalf("NewMHEContext: %v", err)
