@@ -330,4 +330,84 @@ func TestAppendCSV(t *testing.T) {
 			t.Errorf("rows = %d, want 1 (just header)", len(rows))
 		}
 	})
+
+	t.Run("header_has_param_profile_column", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "out.csv")
+		if err := AppendCSV(path, []BenchmarkRun{makeRun(1)}); err != nil {
+			t.Fatalf("AppendCSV: %v", err)
+		}
+		f, _ := os.Open(path)
+		defer f.Close()
+		rows, _ := csv.NewReader(f).ReadAll()
+		header := rows[0]
+		if len(header) < 12 {
+			t.Fatalf("header has %d columns, want at least 12", len(header))
+		}
+		if header[11] != "param_profile" {
+			t.Errorf("header[11] = %q, want %q", header[11], "param_profile")
+		}
+	})
+
+	t.Run("param_profile_written_to_csv", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "out.csv")
+		run := makeRun(1)
+		run.ParamProfile = "full"
+		if err := AppendCSV(path, []BenchmarkRun{run}); err != nil {
+			t.Fatalf("AppendCSV: %v", err)
+		}
+		f, _ := os.Open(path)
+		defer f.Close()
+		rows, _ := csv.NewReader(f).ReadAll()
+		// rows[0]=header, rows[1]=encrypt, rows[2]=decrypt
+		for _, row := range rows[1:] {
+			if row[11] != "full" {
+				t.Errorf("param_profile = %q, want %q", row[11], "full")
+			}
+		}
+	})
+
+	t.Run("param_profile_empty_for_legacy_runs", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "out.csv")
+		// makeRun leaves ParamProfile as zero value ""
+		if err := AppendCSV(path, []BenchmarkRun{makeRun(1)}); err != nil {
+			t.Fatalf("AppendCSV: %v", err)
+		}
+		f, _ := os.Open(path)
+		defer f.Close()
+		rows, _ := csv.NewReader(f).ReadAll()
+		for _, row := range rows[1:] {
+			if row[11] != "" {
+				t.Errorf("param_profile for legacy run = %q, want empty string", row[11])
+			}
+		}
+	})
+
+	t.Run("mixed_runs_param_profile_backward_compat", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "out.csv")
+		legacy := makeRun(1) // ParamProfile = ""
+		withProfile := makeRun(2)
+		withProfile.ParamProfile = "tight"
+		if err := AppendCSV(path, []BenchmarkRun{legacy, withProfile}); err != nil {
+			t.Fatalf("AppendCSV: %v", err)
+		}
+		f, _ := os.Open(path)
+		defer f.Close()
+		rows, _ := csv.NewReader(f).ReadAll()
+		// 1 header + 4 phase rows (2 runs × 2 phases)
+		if len(rows) != 5 {
+			t.Fatalf("rows = %d, want 5", len(rows))
+		}
+		// rows[1] and rows[2] are legacy run (ParamProfile="")
+		if rows[1][11] != "" {
+			t.Errorf("legacy run param_profile = %q, want \"\"", rows[1][11])
+		}
+		// rows[3] and rows[4] are withProfile run (ParamProfile="tight")
+		if rows[3][11] != "tight" {
+			t.Errorf("profile run param_profile = %q, want \"tight\"", rows[3][11])
+		}
+	})
 }
