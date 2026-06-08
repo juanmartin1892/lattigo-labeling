@@ -287,9 +287,12 @@ func Sum(params bgv.Parameters, labeledciphertext1, labeledciphertext2 Plaintext
 	}
 
 	// Inicializar elementsB
+	// Pre-allocate β at degree=1, level=1. Using degree>1 here would cause bgv.Evaluator.Add
+	// to keep the output at the higher degree (via InitOutputBinaryOp's max-degree rule),
+	// breaking subsequent RotateColumns calls which require degree==1.
 	labeledciphertextSum.elementsB = make([][]rlwe.Ciphertext, 1)
 	labeledciphertextSum.elementsB[0] = make([]rlwe.Ciphertext, 1)
-	labeledciphertextSum.elementsB[0][0] = *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	labeledciphertextSum.elementsB[0][0] = *rlwe.NewCiphertext(params, 1, 1)
 
 	evaluator := bgv.NewEvaluator(params, nil)
 	err := evaluator.Add(&labeledciphertext1.elementsB[0][0], &labeledciphertext2.elementsB[0][0], &labeledciphertextSum.elementsB[0][0])
@@ -586,16 +589,24 @@ func RotateColumns(params Parameters, labeledciphertext PlaintextLabeledcipherte
 		rotatedCiphertext.elementsA[i] = labeledciphertext.elementsA[sourceIndex]
 	}
 
-	// Copiamos la estructura de elementsB haciendo una copia profunda
+	// Allocate fresh ring.Poly memory for each β component and rotate from the
+	// original into the fresh allocation. A shallow struct copy followed by in-place
+	// rotation would alias the underlying ring.Poly data and corrupt the source.
 	rotatedCiphertext.elementsB = make([][]rlwe.Ciphertext, len(labeledciphertext.elementsB))
 	for i := range labeledciphertext.elementsB {
 		rotatedCiphertext.elementsB[i] = make([]rlwe.Ciphertext, len(labeledciphertext.elementsB[i]))
-		copy(rotatedCiphertext.elementsB[i], labeledciphertext.elementsB[i])
+		for j := range labeledciphertext.elementsB[i] {
+			src := &labeledciphertext.elementsB[i][j]
+			rotatedCiphertext.elementsB[i][j] = *rlwe.NewCiphertext(params.Parameters, src.Degree(), src.Level())
+		}
 	}
 
-	// Rotamos el elemento B sobre sí mismo
 	evaluator := bgv.NewEvaluator(params.Parameters, evk)
-	err := evaluator.RotateColumns(&rotatedCiphertext.elementsB[0][0], k, &rotatedCiphertext.elementsB[0][0])
+	err := evaluator.RotateColumns(
+		&labeledciphertext.elementsB[0][0],
+		k,
+		&rotatedCiphertext.elementsB[0][0],
+	)
 	if err != nil {
 		return rotatedCiphertext, err
 	}

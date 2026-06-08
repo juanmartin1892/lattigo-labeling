@@ -91,15 +91,16 @@ func Run(name string, fn func()) PhaseResult {
 
 // BenchmarkRun holds all metrics for one complete benchmark experiment run.
 type BenchmarkRun struct {
-	UseCase   string        // "UC1", "UC2a", "UC2b", "UC3"
-	Variant   string        // "std", "label", "label-compact"
-	DBLabel   string        // "DB1", "DB2", "DB3"
-	N         int           // number of records
-	RunID     int           // 1-based repetition index
-	Phases    []PhaseResult
-	CommBytes int64         // total bytes exchanged in threshold decryption (simulated)
-	Rounds    int           // number of threshold decryption rounds
-	Correct   bool
+	UseCase      string        // "UC1", "UC2", "UC3"
+	Variant      string        // "std", "label"
+	DBLabel      string        // "DB1", "DB2", "DB3"
+	N            int           // total number of records
+	RunID        int           // 1-based repetition index
+	Phases       []PhaseResult
+	CommBytes    int64         // total bytes exchanged in threshold decryption (simulated)
+	Rounds       int           // number of threshold decryption rounds
+	Correct      bool
+	ParamProfile string        // "full", "tight", "min" — "" for benchmarks without param sweep
 }
 
 // TotalMs returns the sum of all phase durations in milliseconds.
@@ -115,7 +116,7 @@ func (r BenchmarkRun) TotalMs() float64 {
 var csvHeader = []string{
 	"use_case", "variant", "db_label", "n", "run_id",
 	"phase", "elapsed_ms", "heap_b",
-	"comm_bytes", "rounds", "correct",
+	"comm_bytes", "rounds", "correct", "param_profile",
 }
 
 // AppendCSV appends runs to the CSV file at path, writing the header row if the
@@ -164,6 +165,7 @@ func AppendCSV(path string, runs []BenchmarkRun) error {
 				strconv.FormatInt(commBytes, 10),
 				strconv.Itoa(rounds),
 				strconv.FormatBool(correct),
+				run.ParamProfile,
 			}
 			if err := w.Write(row); err != nil {
 				return err
