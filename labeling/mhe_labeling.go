@@ -220,6 +220,33 @@ func GenCollectiveRelinKey(params Parameters, skShares []*rlwe.SecretKey, crs mu
 	return rlk, nil
 }
 
+// MultOverflowLabeledFree multiplies two PlaintextLabeledciphertexts using the overflow
+// technique without requiring a relinearization key. Unlike MultOverflowLabeled, no
+// key-switching is performed and no collective rlk is needed in the setup phase.
+//
+// The overflow formula is identical to MultOverflowLabeled:
+//
+//	α = Enc(pk_col, a₁·a₂) + a₁·β₂ + a₂·β₁
+//	elementsB = [β₁, β₂]
+//
+// The result is a CiphertextLabeledciphertext at the same level as the inputs; no
+// multiplicative level is consumed in the inner BGV scheme (depth 0 inner circuit).
+//
+// Note: subsequent SumOverflowCiphertextLabeled + RotateColumnsOverflow steps cause β
+// to grow exponentially (2^L pairs after L rotation steps). Use DecryptThresholdCompact
+// from spec 011 to collapse the β back to O(1) shares at decryption time.
+//
+// Returns an error if either ciphertext contains no ciphertext component.
+func MultOverflowLabeledFree(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error) {
+	if len(lct1.elementsB) == 0 || len(lct1.elementsB[0]) == 0 {
+		return CiphertextLabeledciphertext{}, errors.New("MultOverflowLabeledFree: lct1 contains no ciphertext component")
+	}
+	if len(lct2.elementsB) == 0 || len(lct2.elementsB[0]) == 0 {
+		return CiphertextLabeledciphertext{}, errors.New("MultOverflowLabeledFree: lct2 contains no ciphertext component")
+	}
+	return MultOverflow(ctx.Params, lct1, lct2, ctx.CollectivePK, nil)
+}
+
 // SumLabeled adds two PlaintextLabeledciphertexts encrypted under the same MHEContext
 // collective public key and returns their labeled sum.
 //

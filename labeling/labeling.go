@@ -35,6 +35,17 @@ type Labeledciphertext[T any] struct {
 	elementsB [][]rlwe.Ciphertext
 }
 
+// BetaCount returns the total number of β ciphertexts stored in this labeled
+// ciphertext. After MultOverflow + L rotate-and-sum steps the count grows as
+// 2^(L+1); use this to observe the β explosion when using SumOverflowCiphertextLabeled.
+func (lct Labeledciphertext[T]) BetaCount() int {
+	n := 0
+	for _, row := range lct.elementsB {
+		n += len(row)
+	}
+	return n
+}
+
 // Aliases de tipo para mayor claridad
 type PlaintextLabeledciphertext = Labeledciphertext[PlaintextElements]
 type CiphertextLabeledciphertext = Labeledciphertext[*CiphertextElement]
@@ -538,8 +549,9 @@ func SumOverflowCiphertext(params Parameters, labeledciphertext1, labeledciphert
 	ct1 := (*rlwe.Ciphertext)(labeledciphertext1.elementsA)
 	ct2 := (*rlwe.Ciphertext)(labeledciphertext2.elementsA)
 
-	// Create output ciphertext
-	result := rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	// Allocate degree=1 explicitly: Lattigo's InitOutputBinaryOp takes the max degree
+	// of op0, op1, and opOut, so pre-allocating at degree>1 would corrupt the output.
+	result := rlwe.NewCiphertext(params, 1, params.MaxLevel())
 
 	// Perform addition
 	err := evaluator.Add(ct1, ct2, result)

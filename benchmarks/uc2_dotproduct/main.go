@@ -417,7 +417,7 @@ func runStd(
 
 // runLabel benchmarks the label CF variant:
 // EncryptLabeled + MultLabeled per block + RotateColumns/SumLabeled rotate-and-sum
-// + threshold decryption via DecryptThresholdLabeled.
+// + threshold decryption.
 func runLabel(
 	params labeling.Parameters,
 	ds harness.Dataset,
@@ -443,12 +443,10 @@ func runLabel(
 		if err != nil {
 			log.Fatalf("NewMHEContext: %v", err)
 		}
-
 		rlk, err = labeling.GenCollectiveRelinKey(params, skShares[:], crs)
 		if err != nil {
 			log.Fatalf("GenCollectiveRelinKey: %v", err)
 		}
-
 		galEls := rotationGaloisEls(params)
 		galKeys, err := genCollectiveGaloisKeys(bgvParams, skShares[:], crs, galEls)
 		if err != nil {
