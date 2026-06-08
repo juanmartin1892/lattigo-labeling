@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	"github.com/tuneinsight/lattigo/v6/schemes/bgv"
 )
 
 const (
@@ -589,6 +590,80 @@ func TestApplyEvaluationKeyOverflow(t *testing.T) {
 
 			want := mulVectors(params.PlaintextModulus(), valuesA, valuesB)
 			assertEqualVectors(t, got, want)
+		})
+	}
+}
+
+// encryptAtMaxLevel encodes values at MaxLevel and encrypts under sk, returning a raw
+// BGV ciphertext for the modulus-switch tests.
+func encryptAtMaxLevel(t *testing.T, params Parameters, sk *rlwe.SecretKey, values []uint64) *rlwe.Ciphertext {
+	t.Helper()
+	bgvParams := params.Parameters
+	plaintext := bgv.NewPlaintext(bgvParams, bgvParams.MaxLevel())
+	if err := bgv.NewEncoder(bgvParams).Encode(values, plaintext); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	ciphertext, err := rlwe.NewEncryptor(bgvParams, sk).EncryptNew(plaintext)
+	if err != nil {
+		t.Fatalf("encrypt failed: %v", err)
+	}
+	return ciphertext
+}
+
+// decodeWith decrypts ciphertext under sk and returns the slot vector.
+func decodeWith(t *testing.T, params Parameters, sk *rlwe.SecretKey, ciphertext *rlwe.Ciphertext) []uint64 {
+	t.Helper()
+	bgvParams := params.Parameters
+	plaintext := rlwe.NewDecryptor(bgvParams, sk).DecryptNew(ciphertext)
+	decoded := make([]uint64, bgvParams.MaxSlots())
+	if err := bgv.NewEncoder(bgvParams).Decode(plaintext, decoded); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	return decoded
+}
+
+func TestRescaleToLevel(t *testing.T) {
+	params := testParameters(t)
+	maxLevel := params.MaxLevel()
+
+	testCases := []struct {
+		name        string
+		targetLevel int
+		wantLevel   int
+		wantErr     bool
+	}{
+		{name: "rescale_to_1", targetLevel: 1, wantLevel: 1},
+		{name: "rescale_to_0", targetLevel: 0, wantLevel: 0},
+		{name: "target_equals_max_is_copy", targetLevel: maxLevel, wantLevel: maxLevel},
+		{name: "target_above_max_is_copy", targetLevel: maxLevel + 5, wantLevel: maxLevel},
+		{name: "negative_target_errors", targetLevel: -1, wantErr: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sk := rlwe.NewKeyGenerator(params.Parameters).GenSecretKeyNew()
+			values := testValues(params)
+			ciphertext := encryptAtMaxLevel(t, params, sk, values)
+
+			got, err := RescaleToLevel(params, ciphertext, tc.targetLevel)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for targetLevel %d, got nil", tc.targetLevel)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RescaleToLevel failed: %v", err)
+			}
+			if got.Level() != tc.wantLevel {
+				t.Fatalf("level mismatch: got %d want %d", got.Level(), tc.wantLevel)
+			}
+			// Input must not be mutated: RescaleToLevel returns a deep copy.
+			if ciphertext.Level() != maxLevel {
+				t.Fatalf("input ciphertext level mutated: got %d want %d", ciphertext.Level(), maxLevel)
+			}
+			// The plaintext value must survive the modulus switch.
+			assertEqualVectors(t, decodeWith(t, params, sk, got), values)
 		})
 	}
 }
