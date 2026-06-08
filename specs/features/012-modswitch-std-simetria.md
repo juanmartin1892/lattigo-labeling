@@ -1,7 +1,7 @@
 # Modulus-switch en std: comparación simétrica de comunicación de descifrado
 
 **ID:** 012  
-**Estado:** Ready  
+**Estado:** Done  
 **Fecha:** 2026-06-08  
 **Autor:** juanmartin
 
@@ -119,14 +119,28 @@ de variantes junto a `"std"` y `"label"`.
 
 ## Criterios de Aceptación
 
-- [ ] Tests table-driven para `RescaleToLevel` (nivel baja, valor preservado, edge cases).
-- [ ] `RescaleToLevel` implementada según interfaz, GoDoc en inglés.
-- [ ] `go vet ./...` sin warnings.
-- [ ] `go test -race ./labeling/...` sin data races.
-- [ ] `go build ./...` exitoso.
-- [ ] UC2 y UC3 ejecutan 3 variantes (std, std_modsw, label) con `param_profile`.
-- [ ] CommBytes de `std_modsw` = CommBytes de `label` (verificado en CSV).
-- [ ] Determinación empírica de la corrección de `std_modsw` en `tight` documentada.
+- [x] Tests table-driven para `RescaleToLevel` (nivel baja, valor preservado, edge cases).
+- [x] `RescaleToLevel` implementada según interfaz, GoDoc en inglés.
+- [x] `go vet ./...` sin warnings.
+- [x] `go test -race ./labeling/...` sin data races.
+- [x] `go build ./...` exitoso.
+- [x] UC2 y UC3 ejecutan 3 variantes (std, std_modsw, label) con `param_profile`.
+- [x] CommBytes de `std_modsw` = CommBytes de `label` (verificado en CSV: 1 048 576 B UC2 / 2 097 152 B UC3, byte a byte).
+- [x] Determinación empírica de la corrección de `std_modsw` en `tight` documentada.
+
+---
+
+## Resultado Empírico (20 reps × 3 DB × 3 perfiles)
+
+**Hipótesis confirmada:** `std_modsw` correcto en `tight` (60/60 en UC2 y UC3) mientras
+`label` falla (0/60). `std_modsw` iguala la comunicación de `label` byte a byte, es más
+rápido (UC3: 17.0 s vs 19.4 s) y usa menos memoria.
+
+**Conclusión:** la ventaja de comunicación de `label` **no es intrínseca a CF** — `std` la
+replica con un modswitch (+2–4 ms) sin perder corrección. El valor real de CF está en el
+setup sin RLK colectiva y en las rondas constantes en L (UC4), no en bytes de descifrado.
+
+Análisis detallado: `~/vault/proyectos/tfm-uvigo/analisis-modswitch-simetria-comunicacion.md`.
 
 ---
 
