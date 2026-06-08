@@ -46,6 +46,15 @@ func (lct Labeledciphertext[T]) BetaCount() int {
 	return n
 }
 
+// AlphaLevel returns the BGV level of the α (elementsA) ciphertext in clct, or
+// -1 if there is no α component. Used by benchmarks to compute CKS share sizes.
+func AlphaLevel(clct CiphertextLabeledciphertext) int {
+	if clct.elementsA == nil {
+		return -1
+	}
+	return (*rlwe.Ciphertext)(clct.elementsA).Level()
+}
+
 // Aliases de tipo para mayor claridad
 type PlaintextLabeledciphertext = Labeledciphertext[PlaintextElements]
 type CiphertextLabeledciphertext = Labeledciphertext[*CiphertextElement]

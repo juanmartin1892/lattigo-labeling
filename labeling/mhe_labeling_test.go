@@ -8,6 +8,21 @@ import (
 	"github.com/tuneinsight/lattigo/v6/utils/sampling"
 )
 
+// buildCompactTestSetup extends buildMHETestSetup with Galois keys for rotations
+// in rotSteps. Returns ctx, shares, skIdeal, and an evaluation key set.
+func buildCompactTestSetup(t *testing.T, params Parameters, nParties int, rotSteps []int) (MHEContext, []*rlwe.SecretKey, *rlwe.SecretKey, *rlwe.MemEvaluationKeySet) {
+	t.Helper()
+	ctx, shares, skIdeal := buildMHETestSetup(t, params, nParties)
+
+	galEls := make([]uint64, len(rotSteps))
+	for i, step := range rotSteps {
+		galEls[i] = params.GaloisElementForColRotation(step)
+	}
+	galKeys := GenerateGaloisKeys(params, skIdeal, galEls)
+	evk := GenerateMemEvaluationKeySetWithGalois(nil, galKeys...)
+	return ctx, shares, skIdeal, evk
+}
+
 // --- Homomorphic operations helpers (spec 004) ---
 
 // mheRLKCRSSeed is the fixed CRS seed for collective relinearization key generation
@@ -1410,6 +1425,319 @@ func TestDecryptThresholdOverflow(t *testing.T) {
 		_, err = DecryptThresholdOverflow(ctx, combined, CiphertextLabeledciphertext{})
 		if err == nil {
 			t.Fatal("expected error for empty clct, got nil")
+		}
+	})
+}
+
+// TestCopyBeta verifies that CopyBeta produces a deep copy with no shared ring.Poly
+// memory (spec 011).
+func TestCopyBeta(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("HappyPath", func(t *testing.T) {
+		ctx, _, _ := buildMHETestSetup(t, params, 2)
+		lct, err := EncryptLabeled(ctx, fillSlots(params, 7))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		betaCopy, err := CopyBeta(ctx, lct)
+		if err != nil {
+			t.Fatalf("CopyBeta: %v", err)
+		}
+		if betaCopy == nil {
+			t.Fatal("CopyBeta returned nil")
+		}
+		if betaCopy.Level() != lct.elementsB[0][0].Level() {
+			t.Errorf("level mismatch: got %d, want %d", betaCopy.Level(), lct.elementsB[0][0].Level())
+		}
+		// Ensure it is a distinct pointer (deep copy).
+		if betaCopy == &lct.elementsB[0][0] {
+			t.Fatal("CopyBeta returned the same pointer as the source")
+		}
+	})
+
+	t.Run("Error_NoBeta", func(t *testing.T) {
+		ctx, _, _ := buildMHETestSetup(t, params, 2)
+		_, err := CopyBeta(ctx, PlaintextLabeledciphertext{})
+		if err == nil {
+			t.Fatal("expected error for empty lct, got nil")
+		}
+	})
+}
+
+// genCompactDecryption simulates the full compact threshold decrypt for a single block.
+func genCompactDecryption(t *testing.T, ctx MHEContext, shares []*rlwe.SecretKey, clct CiphertextLabeledciphertext, betaOrig *rlwe.Ciphertext) CompactSelfProductShare {
+	t.Helper()
+	decShares := make([]CompactSelfProductShare, len(shares))
+	for i, sk := range shares {
+		var err error
+		decShares[i], err = GenCompactSelfProductShare(ctx, sk, clct, betaOrig)
+		if err != nil {
+			t.Fatalf("GenCompactSelfProductShare[%d]: %v", i, err)
+		}
+	}
+	combined, err := AggregateCompactSelfProductShares(ctx, decShares)
+	if err != nil {
+		t.Fatalf("AggregateCompactSelfProductShares: %v", err)
+	}
+	return combined
+}
+
+// TestGenCompactSelfProductShare verifies share generation for compact self-product
+// decryption (spec 011).
+func TestGenCompactSelfProductShare(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("HappyPath", func(t *testing.T) {
+		rotSteps := []int{1}
+		ctx, shares, _, evk := buildCompactTestSetup(t, params, 2, rotSteps)
+		lct, err := EncryptLabeled(ctx, fillSlots(params, 5))
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		betaOrig, err := CopyBeta(ctx, lct)
+		if err != nil {
+			t.Fatalf("CopyBeta: %v", err)
+		}
+		clctSq, err := MultOverflowLabeledFree(ctx, lct, lct)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeledFree: %v", err)
+		}
+		clctAlpha, err := CompactRotateAndSumAlpha(ctx, clctSq, rotSteps, evk)
+		if err != nil {
+			t.Fatalf("CompactRotateAndSumAlpha: %v", err)
+		}
+		share, err := GenCompactSelfProductShare(ctx, shares[0], clctAlpha, betaOrig)
+		if err != nil {
+			t.Fatalf("GenCompactSelfProductShare: %v", err)
+		}
+		if share.Alpha.Value.Level() != clctAlpha.elementsA.Level() {
+			t.Errorf("alpha share level mismatch")
+		}
+		if share.Beta.Value.Level() != betaOrig.Level() {
+			t.Errorf("beta share level mismatch")
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, shares, _, _ := buildCompactTestSetup(t, params, 2, []int{1})
+		lct, _ := EncryptLabeled(ctx, fillSlots(params, 3))
+		betaOrig, _ := CopyBeta(ctx, lct)
+		clctSq, _ := MultOverflowLabeledFree(ctx, lct, lct)
+
+		cases := []struct {
+			name     string
+			sk       *rlwe.SecretKey
+			clct     CiphertextLabeledciphertext
+			betaOrig *rlwe.Ciphertext
+		}{
+			{name: "nil_sk", sk: nil, clct: clctSq, betaOrig: betaOrig},
+			{name: "nil_clct_A", sk: shares[0], clct: CiphertextLabeledciphertext{}, betaOrig: betaOrig},
+			{name: "nil_betaOrig", sk: shares[0], clct: clctSq, betaOrig: nil},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := GenCompactSelfProductShare(ctx, tc.sk, tc.clct, tc.betaOrig)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
+		}
+	})
+}
+
+// TestAggregateCompactSelfProductShares verifies share aggregation (spec 011).
+func TestAggregateCompactSelfProductShares(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("HappyPath", func(t *testing.T) {
+		rotSteps := []int{1}
+		ctx, shares, _, evk := buildCompactTestSetup(t, params, 2, rotSteps)
+		lct, _ := EncryptLabeled(ctx, fillSlots(params, 4))
+		betaOrig, _ := CopyBeta(ctx, lct)
+		clctSq, _ := MultOverflowLabeledFree(ctx, lct, lct)
+		clctAlpha, _ := CompactRotateAndSumAlpha(ctx, clctSq, rotSteps, evk)
+
+		decShares := make([]CompactSelfProductShare, 2)
+		for i, sk := range shares {
+			var err error
+			decShares[i], err = GenCompactSelfProductShare(ctx, sk, clctAlpha, betaOrig)
+			if err != nil {
+				t.Fatalf("GenCompactSelfProductShare[%d]: %v", i, err)
+			}
+		}
+		_, err := AggregateCompactSelfProductShares(ctx, decShares)
+		if err != nil {
+			t.Fatalf("AggregateCompactSelfProductShares: %v", err)
+		}
+	})
+
+	t.Run("Error_Empty", func(t *testing.T) {
+		ctx, _, _ := buildMHETestSetup(t, params, 2)
+		_, err := AggregateCompactSelfProductShares(ctx, nil)
+		if err == nil {
+			t.Fatal("expected error for nil shares, got nil")
+		}
+	})
+}
+
+// TestDecryptThresholdCompact verifies the compact threshold decryption round-trip
+// and equivalence with DecryptThresholdOverflow for the self-product case (spec 011).
+func TestDecryptThresholdCompact(t *testing.T) {
+	params := testParameters(t)
+	T := params.PlaintextModulus()
+
+	t.Run("SelfProduct_1step", func(t *testing.T) {
+		// Encrypt [5, 7, 0, ...]. After self-product + rotate-by-1:
+		// expected slot[0] = 5² + 7² = 74.
+		rotSteps := []int{1}
+		ctx, shares, _, evk := buildCompactTestSetup(t, params, 2, rotSteps)
+
+		vals := make([]uint64, params.MaxSlots())
+		vals[0], vals[1] = 5, 7
+		lct, err := EncryptLabeled(ctx, vals)
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		betaOrig, err := CopyBeta(ctx, lct)
+		if err != nil {
+			t.Fatalf("CopyBeta: %v", err)
+		}
+		clctSq, err := MultOverflowLabeledFree(ctx, lct, lct)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeledFree: %v", err)
+		}
+		clctAlpha, err := CompactRotateAndSumAlpha(ctx, clctSq, rotSteps, evk)
+		if err != nil {
+			t.Fatalf("CompactRotateAndSumAlpha: %v", err)
+		}
+		combined := genCompactDecryption(t, ctx, shares, clctAlpha, betaOrig)
+		got, err := DecryptThresholdCompact(ctx, combined, clctAlpha, betaOrig, rotSteps)
+		if err != nil {
+			t.Fatalf("DecryptThresholdCompact: %v", err)
+		}
+		want := (5*5 + 7*7) % T
+		if got[0] != want {
+			t.Errorf("slot 0: got %d, want %d", got[0], want)
+		}
+	})
+
+	t.Run("SelfProduct_2steps", func(t *testing.T) {
+		// Encrypt [3, 5, 7, 11, 0, ...]. rotate-and-sum steps [2,1] covers all 4 slots.
+		// expected slot[0] = 3² + 5² + 7² + 11² = 9+25+49+121 = 204.
+		rotSteps := []int{2, 1}
+		ctx, shares, _, evk := buildCompactTestSetup(t, params, 2, rotSteps)
+
+		vals := make([]uint64, params.MaxSlots())
+		vals[0], vals[1], vals[2], vals[3] = 3, 5, 7, 11
+		lct, err := EncryptLabeled(ctx, vals)
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		betaOrig, err := CopyBeta(ctx, lct)
+		if err != nil {
+			t.Fatalf("CopyBeta: %v", err)
+		}
+		clctSq, err := MultOverflowLabeledFree(ctx, lct, lct)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeledFree: %v", err)
+		}
+		clctAlpha, err := CompactRotateAndSumAlpha(ctx, clctSq, rotSteps, evk)
+		if err != nil {
+			t.Fatalf("CompactRotateAndSumAlpha: %v", err)
+		}
+		combined := genCompactDecryption(t, ctx, shares, clctAlpha, betaOrig)
+		got, err := DecryptThresholdCompact(ctx, combined, clctAlpha, betaOrig, rotSteps)
+		if err != nil {
+			t.Fatalf("DecryptThresholdCompact: %v", err)
+		}
+		want := (3*3 + 5*5 + 7*7 + 11*11) % T
+		if got[0] != want {
+			t.Errorf("slot 0: got %d, want %d", got[0], want)
+		}
+	})
+
+	t.Run("EquivalenceWithOverflow", func(t *testing.T) {
+		// Verify DecryptThresholdCompact == DecryptThresholdOverflow for the
+		// self-product case. Use rotSteps=[1] (L=1, 2^2=4 β after sum — feasible).
+		rotSteps := []int{1}
+		ctx, shares, _, evk := buildCompactTestSetup(t, params, 2, rotSteps)
+
+		vals := make([]uint64, params.MaxSlots())
+		vals[0], vals[1] = 9, 13
+		lct, err := EncryptLabeled(ctx, vals)
+		if err != nil {
+			t.Fatalf("EncryptLabeled: %v", err)
+		}
+		betaOrig, err := CopyBeta(ctx, lct)
+		if err != nil {
+			t.Fatalf("CopyBeta: %v", err)
+		}
+
+		// Compact path: α-only rotate-and-sum.
+		clctSq, err := MultOverflowLabeledFree(ctx, lct, lct)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeledFree: %v", err)
+		}
+		clctAlpha, err := CompactRotateAndSumAlpha(ctx, clctSq, rotSteps, evk)
+		if err != nil {
+			t.Fatalf("CompactRotateAndSumAlpha: %v", err)
+		}
+		combinedCompact := genCompactDecryption(t, ctx, shares, clctAlpha, betaOrig)
+		gotCompact, err := DecryptThresholdCompact(ctx, combinedCompact, clctAlpha, betaOrig, rotSteps)
+		if err != nil {
+			t.Fatalf("DecryptThresholdCompact: %v", err)
+		}
+
+		// Naive path: full SumOverflowCiphertextLabeled.
+		clctNaive, err := MultOverflowLabeledFree(ctx, lct, lct)
+		if err != nil {
+			t.Fatalf("MultOverflowLabeledFree (naive): %v", err)
+		}
+		for _, step := range rotSteps {
+			clctRot, err := RotateColumnsOverflow(params, clctNaive, step, evk)
+			if err != nil {
+				t.Fatalf("RotateColumnsOverflow step=%d: %v", step, err)
+			}
+			clctNaive, err = SumOverflowCiphertextLabeled(ctx, clctNaive, clctRot)
+			if err != nil {
+				t.Fatalf("SumOverflowCiphertextLabeled step=%d: %v", step, err)
+			}
+		}
+		combinedNaive := genOverflowThresholdDecryption(t, ctx, shares, clctNaive)
+		gotNaive, err := DecryptThresholdOverflow(ctx, combinedNaive, clctNaive)
+		if err != nil {
+			t.Fatalf("DecryptThresholdOverflow: %v", err)
+		}
+
+		if gotCompact[0] != gotNaive[0] {
+			t.Errorf("compact=%d, naive=%d: results differ", gotCompact[0], gotNaive[0])
+		}
+	})
+
+	t.Run("Errors", func(t *testing.T) {
+		ctx, shares, _, evk := buildCompactTestSetup(t, params, 2, []int{1})
+		lct, _ := EncryptLabeled(ctx, fillSlots(params, 3))
+		betaOrig, _ := CopyBeta(ctx, lct)
+		clctSq, _ := MultOverflowLabeledFree(ctx, lct, lct)
+		clctAlpha, _ := CompactRotateAndSumAlpha(ctx, clctSq, []int{1}, evk)
+		combined := genCompactDecryption(t, ctx, shares, clctAlpha, betaOrig)
+
+		cases := []struct {
+			name     string
+			clct     CiphertextLabeledciphertext
+			betaOrig *rlwe.Ciphertext
+		}{
+			{name: "nil_clct_A", clct: CiphertextLabeledciphertext{}, betaOrig: betaOrig},
+			{name: "nil_betaOrig", clct: clctAlpha, betaOrig: nil},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := DecryptThresholdCompact(ctx, combined, tc.clct, tc.betaOrig, []int{1})
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+			})
 		}
 	})
 }

@@ -24,6 +24,210 @@ import (
 	"github.com/tuneinsight/lattigo/v6/schemes/bgv"
 )
 
+// CopyBeta returns a deep copy of lct.elementsB[0][0], the β component used for
+// compact self-product decryption. The returned ciphertext shares no ring.Poly
+// memory with lct and is safe to hold across MultOverflowLabeledFree calls.
+func CopyBeta(ctx MHEContext, lct PlaintextLabeledciphertext) (*rlwe.Ciphertext, error) {
+	if len(lct.elementsB) == 0 || len(lct.elementsB[0]) == 0 {
+		return nil, errors.New("CopyBeta: lct contains no ciphertext component")
+	}
+	src := &lct.elementsB[0][0]
+	dst := rlwe.NewCiphertext(ctx.Params, 1, src.Level())
+	eval := bgv.NewEvaluator(ctx.Params.Parameters, nil)
+	if err := eval.Add(src, []uint64{0}, dst); err != nil {
+		return nil, fmt.Errorf("CopyBeta: %w", err)
+	}
+	return dst, nil
+}
+
+// CompactSelfProductShare holds one party's CKS shares for compact threshold
+// decryption of a self-product CiphertextLabeledciphertext. Only α (the
+// accumulated α_final after rotate-and-sum) and β_orig (the β before
+// MultOverflowLabeledFree) need individual shares.
+//
+// This reduces the number of CKS operations from O(2^L) to O(1) per block,
+// where L is the number of rotate-and-sum steps.
+type CompactSelfProductShare struct {
+	Alpha LabeledDecryptionShare
+	Beta  LabeledDecryptionShare
+}
+
+// GenCompactSelfProductShare generates party i's compact decryption shares for a
+// self-product result. clct must hold the α_final produced by
+// CompactRotateAndSumAlpha; betaOrig must be the β of the original
+// PlaintextLabeledciphertext before MultOverflowLabeledFree was called.
+//
+// Only two CKS shares are generated — one for α_final and one for betaOrig —
+// regardless of how many rotate-and-sum steps were applied.
+func GenCompactSelfProductShare(ctx MHEContext, sk *rlwe.SecretKey, clct CiphertextLabeledciphertext, betaOrig *rlwe.Ciphertext) (CompactSelfProductShare, error) {
+	if sk == nil {
+		return CompactSelfProductShare{}, errors.New("GenCompactSelfProductShare: sk must not be nil")
+	}
+	if clct.elementsA == nil {
+		return CompactSelfProductShare{}, errors.New("GenCompactSelfProductShare: clct contains no A component")
+	}
+	if betaOrig == nil {
+		return CompactSelfProductShare{}, errors.New("GenCompactSelfProductShare: betaOrig must not be nil")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return CompactSelfProductShare{}, fmt.Errorf("GenCompactSelfProductShare: %w", err)
+	}
+	zeroSK := rlwe.NewSecretKey(ctx.Params)
+
+	α := (*rlwe.Ciphertext)(clct.elementsA)
+	alphaShare := proto.AllocateShare(α.Level())
+	proto.GenShare(sk, zeroSK, α, &alphaShare)
+
+	betaShare := proto.AllocateShare(betaOrig.Level())
+	proto.GenShare(sk, zeroSK, betaOrig, &betaShare)
+
+	return CompactSelfProductShare{
+		Alpha: LabeledDecryptionShare{Value: alphaShare},
+		Beta:  LabeledDecryptionShare{Value: betaShare},
+	}, nil
+}
+
+// AggregateCompactSelfProductShares combines all parties' CompactSelfProductShares
+// into a single combined share for DecryptThresholdCompact.
+//
+// shares must contain at least one element and all shares must have matching
+// Alpha and Beta levels.
+func AggregateCompactSelfProductShares(ctx MHEContext, shares []CompactSelfProductShare) (CompactSelfProductShare, error) {
+	if len(shares) == 0 {
+		return CompactSelfProductShare{}, errors.New("AggregateCompactSelfProductShares: shares must not be empty")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return CompactSelfProductShare{}, fmt.Errorf("AggregateCompactSelfProductShares: %w", err)
+	}
+
+	combined := CompactSelfProductShare{
+		Alpha: LabeledDecryptionShare{Value: proto.AllocateShare(shares[0].Alpha.Value.Level())},
+		Beta:  LabeledDecryptionShare{Value: proto.AllocateShare(shares[0].Beta.Value.Level())},
+	}
+	for i, s := range shares {
+		if err := proto.AggregateShares(combined.Alpha.Value, s.Alpha.Value, &combined.Alpha.Value); err != nil {
+			return CompactSelfProductShare{}, fmt.Errorf("AggregateCompactSelfProductShares: alpha share %d: %w", i, err)
+		}
+		if err := proto.AggregateShares(combined.Beta.Value, s.Beta.Value, &combined.Beta.Value); err != nil {
+			return CompactSelfProductShare{}, fmt.Errorf("AggregateCompactSelfProductShares: beta share %d: %w", i, err)
+		}
+	}
+	return combined, nil
+}
+
+// CompactRotateAndSumAlpha runs the rotate-and-sum accumulation tree on the α
+// component of clct, returning a new CiphertextLabeledciphertext that contains
+// only the accumulated α_final (no β component).
+//
+// This is the memory-efficient alternative to running SumOverflowCiphertextLabeled
+// + RotateColumnsOverflow: it avoids the exponential β explosion (2^L β ciphertexts
+// after L steps) by operating exclusively on the α ciphertext.
+//
+// rotOffsets must be the same slice passed later to DecryptThresholdCompact.
+// evk must contain Galois keys for each step in rotOffsets.
+func CompactRotateAndSumAlpha(ctx MHEContext, clct CiphertextLabeledciphertext, rotOffsets []int, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error) {
+	if clct.elementsA == nil {
+		return CiphertextLabeledciphertext{}, errors.New("CompactRotateAndSumAlpha: clct contains no A component")
+	}
+	eval := bgv.NewEvaluator(ctx.Params.Parameters, evk)
+	acc := (*rlwe.Ciphertext)(clct.elementsA)
+	for _, step := range rotOffsets {
+		rotated, err := eval.RotateColumnsNew(acc, step)
+		if err != nil {
+			return CiphertextLabeledciphertext{}, fmt.Errorf("CompactRotateAndSumAlpha rotate step=%d: %w", step, err)
+		}
+		newAcc, err := eval.AddNew(acc, rotated)
+		if err != nil {
+			return CiphertextLabeledciphertext{}, fmt.Errorf("CompactRotateAndSumAlpha add step=%d: %w", step, err)
+		}
+		acc = newAcc
+	}
+	ct := CiphertextElement(*acc)
+	return CiphertextLabeledciphertext{elementsA: &ct}, nil
+}
+
+// DecryptThresholdCompact recovers the slot-sum of squares from a self-product
+// CiphertextLabeledciphertext using the compact β representation.
+//
+// clct must be the output of CompactRotateAndSumAlpha (contains only α_final).
+// betaOrig must be the same ciphertext passed to GenCompactSelfProductShare.
+// rotOffsets must be the same slice used in CompactRotateAndSumAlpha, applied in
+// the same order.
+//
+// Internally: decrypts betaOrig once → b; computes b_sq_sum = Σ_k rot_k(b⊙b)
+// in plaintext; decrypts α_final; returns (plainAlpha + b_sq_sum) mod t.
+func DecryptThresholdCompact(ctx MHEContext, combined CompactSelfProductShare, clct CiphertextLabeledciphertext, betaOrig *rlwe.Ciphertext, rotOffsets []int) ([]uint64, error) {
+	if clct.elementsA == nil {
+		return nil, errors.New("DecryptThresholdCompact: clct contains no A component")
+	}
+	if betaOrig == nil {
+		return nil, errors.New("DecryptThresholdCompact: betaOrig must not be nil")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return nil, fmt.Errorf("DecryptThresholdCompact: %w", err)
+	}
+	encoder := bgv.NewEncoder(ctx.Params.Parameters)
+	zeroSK := rlwe.NewSecretKey(ctx.Params)
+	dec := rlwe.NewDecryptor(ctx.Params, zeroSK)
+
+	switchAndDecode := func(ct *rlwe.Ciphertext, share LabeledDecryptionShare) ([]uint64, error) {
+		ctSwitched := rlwe.NewCiphertext(ctx.Params, 1, ct.Level())
+		proto.KeySwitch(ct, share.Value, ctSwitched)
+		out := make([]uint64, ctx.Params.MaxSlots())
+		return out, encoder.Decode(dec.DecryptNew(ctSwitched), out)
+	}
+
+	// Decrypt β_orig once → b.
+	b, err := switchAndDecode(betaOrig, combined.Beta)
+	if err != nil {
+		return nil, fmt.Errorf("DecryptThresholdCompact: decode betaOrig: %w", err)
+	}
+
+	// Decrypt α_final → plainAlpha.
+	α := (*rlwe.Ciphertext)(clct.elementsA)
+	plainAlpha, err := switchAndDecode(α, combined.Alpha)
+	if err != nil {
+		return nil, fmt.Errorf("DecryptThresholdCompact: decode α: %w", err)
+	}
+
+	// Reconstruct b_sq_sum = Σ_k rot_k(b⊙b) in plaintext.
+	// BGV rotates each half of the slot vector independently (circular within halfSlots).
+	T := ctx.Params.PlaintextModulus()
+	maxSlots := ctx.Params.MaxSlots()
+	halfSlots := maxSlots / 2
+
+	bSq := make([]uint64, maxSlots)
+	for i := range maxSlots {
+		bSq[i] = (b[i] * b[i]) % T
+	}
+
+	tmp := make([]uint64, maxSlots)
+	for _, step := range rotOffsets {
+		// Build rot_step(bSq) into tmp without aliasing.
+		for i := 0; i < halfSlots; i++ {
+			tmp[i] = bSq[(i+step)%halfSlots]
+		}
+		for i := halfSlots; i < maxSlots; i++ {
+			tmp[i] = bSq[halfSlots+(i-halfSlots+step)%halfSlots]
+		}
+		for i := range maxSlots {
+			bSq[i] = (bSq[i] + tmp[i]) % T
+		}
+	}
+
+	result := make([]uint64, maxSlots)
+	for i := range maxSlots {
+		result[i] = (plainAlpha[i] + bSq[i] + T) % T
+	}
+	return result, nil
+}
+
 // MHEContext holds the shared parameters and collective public key for an MHE labeling
 // session. It is produced by NewMHEContext and consumed by EncryptLabeled and subsequent
 // MHE operations (specs 003–006).
