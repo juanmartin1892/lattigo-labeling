@@ -81,6 +81,11 @@ func MultKeepLevel(parameters Parameters, labeledciphertext1, labeledciphertext2
 // MultOverflowKeepLevel computes MultOverflow keeping α at the inputs' level instead of
 // level=1, for the UC4 fixed-level comparison. See spec 013.
 func MultOverflowKeepLevel(parameters Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error)
+
+// SumKeepLevel adds two PlaintextLabeledciphertext keeping β at the inputs' level instead
+// of level=1, so a label rotate-and-sum runs entirely at MaxLevel. (RotateColumns already
+// preserves level; only Sum forced level=1.) See spec 013.
+func SumKeepLevel(params bgv.Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error)
 ```
 
 ### Nuevos wrappers MHE en `labeling/mhe_labeling.go`
@@ -89,8 +94,10 @@ func MultOverflowKeepLevel(parameters Parameters, labeledciphertext1, labeledcip
 // MultLabeledKeepLevel is MultLabeled but keeps β at MaxLevel. See spec 013.
 func MultLabeledKeepLevel(ctx MHEContext, rlk *rlwe.RelinearizationKey, lct1, lct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error)
 
-// MultOverflowLabeledKeepLevel is the MaxLevel mirror of the UC4 overflow multiply. See spec 013.
-func MultOverflowLabeledKeepLevel(ctx MHEContext, rlk *rlwe.RelinearizationKey, lct1, lct2 PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error)
+// MultOverflowLabeledFreeKeepLevel is the rlk-free MaxLevel mirror of the UC4 overflow
+// multiply. SumLabeledKeepLevel is the level-preserving labeled sum. See spec 013.
+func MultOverflowLabeledFreeKeepLevel(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error)
+func SumLabeledKeepLevel(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error)
 ```
 
 ### Variantes nuevas en benchmarks (sin API exportada)
