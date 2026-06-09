@@ -364,8 +364,29 @@ func Sum(params bgv.Parameters, labeledciphertext1, labeledciphertext2 Plaintext
 //   - Computes β ← (β₁ × β₂) + a₁β₂ + a₂β₁ + Enc(r)
 //
 // The result is relinearized using the evaluation key set to keep the ciphertext
-// at degree 1. Returns a PlaintextLabeledciphertext.
+// at degree 1. β is produced at level=1 (the threshold-decryption level used by the
+// CF label variant). Returns a PlaintextLabeledciphertext.
 func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error) {
+	return multAtLevel(params, labeledciphertext1, labeledciphertext2, key, evk, 1)
+}
+
+// MultKeepLevel multiplies two PlaintextLabeledciphertext exactly like Mult, but keeps the
+// resulting β at the inputs' level (MaxLevel for fresh ciphertexts) instead of forcing
+// level=1. It exists to compare std and label threshold decryption on equal footing: at
+// the same ciphertext level both variants produce shares of the same size, so any
+// remaining difference reflects the CF construction itself, not the decrypt level.
+//
+// See spec 013 (fixed-level honest comparison). To obtain the level=1 measurement from the
+// same computation, follow MultKeepLevel with RescaleToLevel(β, 1).
+func MultKeepLevel(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error) {
+	betaLevel := utils.Min(labeledciphertext1.elementsB[0][0].Level(), labeledciphertext2.elementsB[0][0].Level())
+	return multAtLevel(params, labeledciphertext1, labeledciphertext2, key, evk, betaLevel)
+}
+
+// multAtLevel is the shared implementation of Mult and MultKeepLevel. betaLevel selects the
+// level at which the β component (and its intermediate products) are allocated, which
+// becomes the threshold-decryption level of the result.
+func multAtLevel(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet, betaLevel int) (PlaintextLabeledciphertext, error) {
 	// Empezamos calculando la componente A
 	// a ← (a1 × a2 − r) ∈ M
 
@@ -397,7 +418,7 @@ func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLab
 	// (β1 X β2) + a1β2 + a2β1 + Enc(d)(pk, r)
 	labeledciphertextProduct.elementsB = make([][]rlwe.Ciphertext, 1)
 	labeledciphertextProduct.elementsB[0] = make([]rlwe.Ciphertext, 1)
-	labeledciphertextProduct.elementsB[0][0] = *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	labeledciphertextProduct.elementsB[0][0] = *rlwe.NewCiphertext(params, params.MaxLevel(), betaLevel)
 
 	// Primero multiplicamos los textos cifrados
 	evaluator := bgv.NewEvaluator(params.Parameters, evk)
@@ -407,7 +428,7 @@ func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLab
 	}
 
 	// Ahora calculamos a1β2
-	labeledciphertext1elementsB := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	labeledciphertext1elementsB := *rlwe.NewCiphertext(params, params.MaxLevel(), betaLevel)
 	err = evaluator.Mul(&labeledciphertext1.elementsB[0][0], []uint64(labeledciphertext2.elementsA), &labeledciphertext1elementsB)
 	if err != nil {
 		return labeledciphertextProduct, err
@@ -421,7 +442,7 @@ func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLab
 	}
 
 	// Ahora calculamos a2β1
-	labeledciphertext2elementsB := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	labeledciphertext2elementsB := *rlwe.NewCiphertext(params, params.MaxLevel(), betaLevel)
 	err = evaluator.Mul(&labeledciphertext2.elementsB[0][0], []uint64(labeledciphertext1.elementsA), &labeledciphertext2elementsB)
 	if err != nil {
 		return labeledciphertextProduct, err
@@ -464,8 +485,25 @@ func Mult(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLab
 //   - Sets β ← [β₁, β₂]
 //
 // The overflow representation allows subsequent multiplications beyond the noise
-// budget of standard multiplication. Returns a CiphertextLabeledciphertext.
+// budget of standard multiplication. α is produced at level=1. Returns a
+// CiphertextLabeledciphertext.
 func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error) {
+	return multOverflowAtLevel(params, labeledciphertext1, labeledciphertext2, key, evk, 1)
+}
+
+// MultOverflowKeepLevel computes MultOverflow keeping α at the inputs' level (MaxLevel for
+// fresh ciphertexts) instead of forcing level=1. Used for the UC4 fixed-level honest
+// comparison, where the compact threshold decryption of label is measured at the same
+// level as the std baseline. See spec 013.
+func MultOverflowKeepLevel(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error) {
+	alphaLevel := utils.Min(labeledciphertext1.elementsB[0][0].Level(), labeledciphertext2.elementsB[0][0].Level())
+	return multOverflowAtLevel(params, labeledciphertext1, labeledciphertext2, key, evk, alphaLevel)
+}
+
+// multOverflowAtLevel is the shared implementation of MultOverflow and
+// MultOverflowKeepLevel. alphaLevel selects the level at which the α component is built,
+// which becomes its threshold-decryption level (β is stored unchanged at its input level).
+func multOverflowAtLevel(params Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet, alphaLevel int) (CiphertextLabeledciphertext, error) {
 	// MultOverflow implementa: Enc(pk, a1·a2) + a1β2 + a2β1
 	// El resultado se almacena en elementA
 
@@ -489,14 +527,14 @@ func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 Plai
 	evaluator := bgv.NewEvaluator(params.Parameters, evk)
 
 	// Calculamos a1β2 - sin conversiones de tipo!
-	a1beta2 := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	a1beta2 := *rlwe.NewCiphertext(params, params.MaxLevel(), alphaLevel)
 	err = evaluator.Mul(&labeledciphertext2.elementsB[0][0], []uint64(labeledciphertext1.elementsA), &a1beta2)
 	if err != nil {
 		return CiphertextLabeledciphertext{}, err
 	}
 
 	// Calculamos a2β1 - sin conversiones de tipo!
-	a2beta1 := *rlwe.NewCiphertext(params, params.MaxLevel(), 1)
+	a2beta1 := *rlwe.NewCiphertext(params, params.MaxLevel(), alphaLevel)
 	err = evaluator.Mul(&labeledciphertext1.elementsB[0][0], []uint64(labeledciphertext2.elementsA), &a2beta1)
 	if err != nil {
 		return CiphertextLabeledciphertext{}, err
@@ -507,8 +545,8 @@ func MultOverflow(params Parameters, labeledciphertext1, labeledciphertext2 Plai
 	// Primero asegurémonos de que todos tengan el mismo level
 	minLevel := utils.Min(utils.Min(productCiphertext.Level(), a1beta2.Level()), a2beta1.Level())
 
-	// Crear alpha con el nivel mínimo y degree 1
-	alpha := *rlwe.NewCiphertext(params, minLevel, 1)
+	// Crear alpha con degree 1 al nivel mínimo (= alphaLevel; level=1 en el caso std).
+	alpha := *rlwe.NewCiphertext(params, 1, minLevel)
 
 	// Ajustar levels
 	if productCiphertext.Level() > minLevel {
