@@ -1,7 +1,7 @@
 # Comparativa honesta a nivel fijo: rejilla 2×2 {std, label} × {MaxLevel, level=1}
 
 **ID:** 013
-**Estado:** Ready
+**Estado:** Done
 **Fecha:** 2026-06-09
 **Autor:** juanmartin
 
@@ -143,15 +143,42 @@ La columna `param_profile` y el formato CSV no cambian (backward compatible).
 
 ## Criterios de Aceptación
 
-- [ ] Tests table-driven para `MultKeepLevel` y `MultOverflowKeepLevel` (nivel preservado, valor, degree, edge `min`).
-- [ ] `MultKeepLevel`/`MultOverflowKeepLevel` + wrappers MHE implementados, GoDoc en inglés.
-- [ ] `go vet ./...` sin warnings.
-- [ ] `go test -race ./labeling/...` sin data races.
-- [ ] `go build ./...` exitoso.
-- [ ] UC2/UC3 ejecutan `{std, std_modsw, label, label_max}`; UC4 ejecuta `{std, label_compact, label_compact_max}`.
-- [ ] CommBytes a igual nivel coinciden entre std y label (verificado en CSV, byte a byte).
-- [ ] Determinación empírica de corrección de `label_max` en `tight` documentada.
-- [ ] Análisis de doble entrada escrito en `~/vault/proyectos/tfm-uvigo`.
+- [x] Tests table-driven para `MultKeepLevel`, `SumKeepLevel` y `MultOverflowKeepLevel` (nivel preservado, valor, degree, rescale).
+- [x] `MultKeepLevel`/`SumKeepLevel`/`MultOverflowKeepLevel` + wrappers MHE implementados, GoDoc en inglés.
+- [x] `go vet ./...` sin warnings.
+- [x] `go test -race ./labeling/...` sin data races.
+- [x] `go build ./...` exitoso.
+- [x] UC2/UC3 ejecutan `{std, std_modsw, label, label_max}`; UC4 ejecuta `{std, label_compact, label_compact_max}`.
+- [x] CommBytes a igual nivel coinciden entre std y label en UC2/UC3 (byte a byte); UC4 documenta el blow-up de CF.
+- [x] Determinación empírica de corrección de `label_max` en `tight` documentada.
+- [x] Análisis de doble entrada escrito en `~/vault/proyectos/tfm-uvigo`.
+
+---
+
+## Resultado Empírico (20 reps × 3 DB × 3 perfiles)
+
+**Comunicación a igual nivel (UC2/UC3):** std y label coinciden **byte a byte**
+(UC2: 2 097 152 B MaxLevel / 1 048 576 B level=1; UC3: el doble). La "ventaja −50 %" de label
+era el artefacto del nivel.
+
+**Comunicación UC4:** `label_compact` transmite **~93×** la de `std` en DB3 (124× para
+`label_compact_max`), porque descifra por bloque mientras std agrega antes de descifrar. El
+descifrado compacto resuelve la explosión 2^L pero no la asimetría estructural frente a std.
+
+**Corrección en `tight`:** a `level=1`, `std_modsw` acierta (20/20) y `label` falla (0/20) →
+el ruido de la máscara CF es intrínseco. A `MaxLevel`, std y `label_max` aciertan ambos
+(20/20) → el presupuesto amplio absorbe la máscara. UC4 reproduce el patrón
+(`label_compact` 0/20, `label_compact_max` 20/20 en tight).
+
+**Tiempo/memoria:** label es 16–62 % más lento y usa 1.5–4× la memoria de std a igual nivel.
+
+**Conclusión:** **no existe ningún escenario medido en el que CF labeling supere al
+estándar.** A igual nivel: empata en comunicación (UC2/UC3) o pierde por ~100× (UC4), pierde
+en corrección (falla en tight/level=1), y pierde en tiempo y memoria. Lo único a favor de CF
+es el setup sin rlk colectiva (UC4), eclipsado por el blow-up de comunicación. El relato del
+TFM debe ser honesto: CF es interesante teóricamente pero sin ventaja práctica en estos casos.
+
+Análisis detallado: `~/vault/proyectos/tfm-uvigo/analisis-comparativa-nivel-fijo.md`.
 
 ---
 
