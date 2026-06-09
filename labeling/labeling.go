@@ -328,8 +328,23 @@ func DecryptOverflow(params Parameters, key *rlwe.SecretKey, labeledciphertext C
 //   - a ← (a₁ + a₂) mod PlaintextModulus
 //   - β ← β₁ + β₂ (homomorphic addition)
 //
-// Returns the sum as a PlaintextLabeledciphertext.
+// Returns the sum as a PlaintextLabeledciphertext. β is produced at level=1.
 func Sum(params bgv.Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error) {
+	return sumAtLevel(params, labeledciphertext1, labeledciphertext2, 1)
+}
+
+// SumKeepLevel adds two PlaintextLabeledciphertext like Sum, but keeps β at the inputs'
+// level instead of forcing level=1. Used in the fixed-level honest comparison so a label
+// rotate-and-sum can run entirely at MaxLevel and decrypt at the same level as std. See
+// spec 013.
+func SumKeepLevel(params bgv.Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error) {
+	betaLevel := utils.Min(labeledciphertext1.elementsB[0][0].Level(), labeledciphertext2.elementsB[0][0].Level())
+	return sumAtLevel(params, labeledciphertext1, labeledciphertext2, betaLevel)
+}
+
+// sumAtLevel is the shared implementation of Sum and SumKeepLevel. betaLevel selects the
+// level at which the β component of the result is allocated.
+func sumAtLevel(params bgv.Parameters, labeledciphertext1, labeledciphertext2 PlaintextLabeledciphertext, betaLevel int) (PlaintextLabeledciphertext, error) {
 	var labeledciphertextSum PlaintextLabeledciphertext
 
 	// Sumar los elementos A de ambos textos cifrados - sin conversiones de tipo!
@@ -340,12 +355,12 @@ func Sum(params bgv.Parameters, labeledciphertext1, labeledciphertext2 Plaintext
 	}
 
 	// Inicializar elementsB
-	// Pre-allocate β at degree=1, level=1. Using degree>1 here would cause bgv.Evaluator.Add
+	// Pre-allocate β at degree=1. Using degree>1 here would cause bgv.Evaluator.Add
 	// to keep the output at the higher degree (via InitOutputBinaryOp's max-degree rule),
 	// breaking subsequent RotateColumns calls which require degree==1.
 	labeledciphertextSum.elementsB = make([][]rlwe.Ciphertext, 1)
 	labeledciphertextSum.elementsB[0] = make([]rlwe.Ciphertext, 1)
-	labeledciphertextSum.elementsB[0][0] = *rlwe.NewCiphertext(params, 1, 1)
+	labeledciphertextSum.elementsB[0][0] = *rlwe.NewCiphertext(params, 1, betaLevel)
 
 	evaluator := bgv.NewEvaluator(params, nil)
 	err := evaluator.Add(&labeledciphertext1.elementsB[0][0], &labeledciphertext2.elementsB[0][0], &labeledciphertextSum.elementsB[0][0])

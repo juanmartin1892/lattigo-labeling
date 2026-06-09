@@ -110,6 +110,50 @@ func TestMultKeepLevel(t *testing.T) {
 	})
 }
 
+// TestSumKeepLevel verifies that SumKeepLevel keeps β at the inputs' level (MaxLevel)
+// while Sum forces level=1, both decrypting to the same plaintext sum. This lets a label
+// rotate-and-sum run entirely at MaxLevel (spec 013).
+func TestSumKeepLevel(t *testing.T) {
+	params := testParameters(t)
+	maxLevel := params.MaxLevel()
+	if maxLevel < 2 {
+		t.Fatalf("test requires MaxLevel >= 2, got %d", maxLevel)
+	}
+
+	ctx, shares, _ := buildMHETestSetup(t, params, 2)
+	lct1, err := EncryptLabeled(ctx, fillSlots(params, 11))
+	if err != nil {
+		t.Fatalf("EncryptLabeled lct1: %v", err)
+	}
+	lct2, err := EncryptLabeled(ctx, fillSlots(params, 31))
+	if err != nil {
+		t.Fatalf("EncryptLabeled lct2: %v", err)
+	}
+
+	std, err := SumLabeled(ctx, lct1, lct2)
+	if err != nil {
+		t.Fatalf("SumLabeled: %v", err)
+	}
+	if got := std.elementsB[0][0].Level(); got != 1 {
+		t.Errorf("Sum β level: got %d, want 1", got)
+	}
+
+	kept, err := SumLabeledKeepLevel(ctx, lct1, lct2)
+	if err != nil {
+		t.Fatalf("SumLabeledKeepLevel: %v", err)
+	}
+	if got := kept.elementsB[0][0].Level(); got != maxLevel {
+		t.Errorf("SumKeepLevel β level: got %d, want %d", got, maxLevel)
+	}
+
+	got := decryptThreshold(t, ctx, shares, kept)
+	for i, v := range got {
+		if v != 42 {
+			t.Fatalf("slot %d: got %d, want 42", i, v)
+		}
+	}
+}
+
 // TestMultOverflowKeepLevel verifies that MultOverflowKeepLevel keeps α at the inputs'
 // level (MaxLevel) while MultOverflow forces α to level=1, both decrypting to the same
 // plaintext product (spec 013, UC4 fixed-level comparison).

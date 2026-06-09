@@ -470,6 +470,18 @@ func SumLabeled(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (Plaintex
 	return Sum(ctx.Params.Parameters, lct1, lct2)
 }
 
+// SumLabeledKeepLevel is SumLabeled but keeps β at the inputs' level instead of forcing
+// level=1, so a label rotate-and-sum can run entirely at MaxLevel. See spec 013.
+func SumLabeledKeepLevel(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error) {
+	if len(lct1.elementsB) == 0 || len(lct1.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("SumLabeledKeepLevel: lct1 contains no ciphertext component")
+	}
+	if len(lct2.elementsB) == 0 || len(lct2.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("SumLabeledKeepLevel: lct2 contains no ciphertext component")
+	}
+	return SumKeepLevel(ctx.Params.Parameters, lct1, lct2)
+}
+
 // MultLabeled multiplies two PlaintextLabeledciphertexts encrypted under the same
 // MHEContext collective public key, using the collective relinearization key for degree
 // reduction after the homomorphic multiplication.
