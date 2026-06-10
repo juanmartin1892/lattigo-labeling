@@ -15,6 +15,7 @@
 package labeling
 
 import (
+	"fmt"
 	"math"
 	"math/bits"
 
@@ -53,6 +54,38 @@ func AlphaLevel(clct CiphertextLabeledciphertext) int {
 		return -1
 	}
 	return (*rlwe.Ciphertext)(clct.elementsA).Level()
+}
+
+// RescaleToLevel reduces a BGV ciphertext to targetLevel by successive modulus
+// switching (Rescale), dividing the noise by each dropped prime while preserving the
+// plaintext's most-significant bits. The ciphertext Scale is updated by each Rescale so
+// that a subsequent Decode recovers the correct value.
+//
+// If the ciphertext is already at or below targetLevel it is returned as a deep copy
+// without modification (the level is never increased). This requires the BGV
+// (non scale-invariant) evaluator; with the parameters used in this project Rescale is
+// active. It returns an error if targetLevel is negative or if a Rescale step fails.
+//
+// RescaleToLevel exists to compare, on equal footing, the threshold-decryption
+// communication of the standard BGV path against the CF labeling path, which operates
+// natively at level=1. See spec 012.
+func RescaleToLevel(parameters Parameters, ciphertext *rlwe.Ciphertext, targetLevel int) (*rlwe.Ciphertext, error) {
+	if targetLevel < 0 {
+		return nil, fmt.Errorf("RescaleToLevel: targetLevel %d must be non-negative", targetLevel)
+	}
+	if ciphertext.Level() <= targetLevel {
+		return ciphertext.CopyNew(), nil
+	}
+	evaluator := bgv.NewEvaluator(parameters.Parameters, nil)
+	current := ciphertext.CopyNew()
+	for current.Level() > targetLevel {
+		next := rlwe.NewCiphertext(parameters.Parameters, current.Degree(), current.Level()-1)
+		if err := evaluator.Rescale(current, next); err != nil {
+			return nil, fmt.Errorf("RescaleToLevel: rescale from level %d: %w", current.Level(), err)
+		}
+		current = next
+	}
+	return current, nil
 }
 
 // Aliases de tipo para mayor claridad
