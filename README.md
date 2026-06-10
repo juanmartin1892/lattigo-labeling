@@ -1,37 +1,65 @@
-# Labeling en Cifrado Homomórfico con Lattigo
+# Labeling en Cifrado Homomórfico Multipartito con Lattigo
 
-Implementación de la técnica de labeling aplicada a esquemas de cifrado homomórfico utilizando la librería [Lattigo](https://github.com/tuneinsight/lattigo) en Go.
+Implementación de la técnica de labeling de Catalano-Fiore (CF) sobre el esquema BGV en modo multipartido (MHE), usando la librería [Lattigo v6.1.1](https://github.com/tuneinsight/lattigo) en Go. El proyecto incluye un framework de benchmark que compara el protocolo CF contra el esquema estándar en cuatro casos de uso, con el objetivo de identificar escenarios donde CF aporta una ventaja real.
 
-## Descripción
+Este trabajo forma parte del **Trabajo Fin de Máster** del Máster Interuniversitario en Ciberseguridad (Universidade de Vigo / Universidade da Coruña), curso 2025/2026.
 
-Este proyecto implementa operaciones de cifrado homomórfico con la técnica de **labeling**, permitiendo realizar operaciones aritméticas más complejas sobre datos cifrados sin que el crecimiento del ruido impida su ejecución. La implementación se basa en el esquema BGV (Brakerski-Gentry-Vaikuntanathan) y extiende las capacidades computacionales del cifrado homomórfico estándar.
+**Paper base**: Catalano, D., & Fiore, D. (2015). *Labeling Homomorphic Encryption: Computing on Encrypted Data with Less Noise*. [https://eprint.iacr.org/2014/813.pdf](https://eprint.iacr.org/2014/813.pdf)
 
-Esta implementación está basada en el paper **"Labeling Homomorphic Encryption: Computing on Encrypted Data with Less Noise"** de Catalano y Fiore (2015), disponible en [https://eprint.iacr.org/2014/813.pdf](https://eprint.iacr.org/2014/813.pdf).
+## ¿Qué es CF Labeling?
 
-### ¿Qué es Labeling?
+En el esquema estándar, cifrar `v` produce `CT = Enc(v)`. La construcción CF divide el valor en dos componentes: `β = Enc(b)` (máscara aleatoria cifrada) y `a = v − b` (residuo público). Esta estructura permite al servidor evaluar ciertas operaciones usando la parte pública `a` sin acceder a `v`, reduciendo el ruido que consumen las operaciones homomórficas.
 
-La técnica de labeling permite ejecutar operaciones homomórficas más complejas controlando el crecimiento del ruido inherente a estas operaciones. Por ejemplo mientras que un esquema homomórfico estándar podría permitir multiplicaciones hasta un cierto nivel (x³), la técnica de labeling permite realizar multiplicaciones adicionales. Esto posibilita operaciones como x³ × x³ = x⁶, llegando efectivamente a un nivel superior de profundidad multiplicativa.
+## Protocolo CF-Scalar
 
-El labeling mantiene información adicional (etiquetas) en los textos cifrados que permite gestionar el presupuesto de ruido de forma más eficiente, ampliando las capacidades computacionales sin comprometer la seguridad.
+El resultado más relevante del proyecto es el protocolo **CF-scalar** para el cálculo de `Σvᵢ²` (suma de cuadrados, componente central de la varianza). Usando una única máscara broadcast `bⱼ` por bloque en lugar de una máscara por slot, la evaluación se reduce a:
 
-## Características
+```
+α = 2·S·β + n·βSq
+```
 
-**Operaciones básicas con labeling:**
-- Suma de textos cifrados
-- Multiplicación de textos cifrados con control de ruido mejorado
-- Rotación de columnas en textos cifrados
-- Aplicación de claves de evaluación para cambio de claves
+donde `S = Σ(vᵢ − bⱼ)` y `S2 = Σ(vᵢ − bⱼ)²` son escalares que el cliente calcula en claro. El servidor solo ejecuta dos multiplicaciones escalar×ciphertext, sin rotaciones ni claves de evaluación.
 
-**Operaciones avanzadas (overflow):**
-- Multiplicación con overflow para operaciones de mayor profundidad
-- Suma con overflow (mixta y entre ciphertexts)
-- Rotación de columnas con overflow
-- Aplicación de claves de evaluación con overflow
-- Soporte para expresiones polinómicas complejas
+**Resultado experimental** (20 repeticiones × 3 tamaños de DB × 3 perfiles de parámetros):
 
-**Dos tipos de labeled ciphertexts:**
-- `PlaintextLabeledciphertext`: Elementos A en texto plano (operaciones básicas)
-- `CiphertextLabeledciphertext`: Elementos A cifrados (operaciones con overflow y mayor profundidad)
+| Métrica | std | label\_cf\_scalar |
+|---|---|---|
+| Corrección en parámetros mínimos (S3/min) | ❌ 0/20 | ✅ 20/20 |
+| Evaluación — 1M registros | 16.0 s | 0.45 s (×35) |
+| Comunicación threshold — 1M registros | 4.0 MB | 4.0 MB |
+| Claves de evaluación requeridas | rlk + 13 Galois | ninguna |
+
+## Casos de Uso Implementados
+
+| UC | Circuito | Variantes |
+|---|---|---|
+| UC1 — Suma | `Σvᵢ` (profundidad 0) | std, label |
+| UC2 — Producto escalar | `Σ(xᵢ·yᵢ)` (profundidad 1) | std, std\_modsw, label, label\_max |
+| UC3 — Varianza completa | `Σvᵢ²` + `Σvᵢ` (profundidad 1) | std, std\_modsw, label, label\_max |
+| UC4 — Varianza compacta | `Σvᵢ²` con compactación de β y CF-scalar | std, label\_compact, label\_compact\_max, label\_compact\_mb, label\_cf\_scalar |
+
+Los benchmarks usan tres tamaños de base de datos (DB1=512, DB2=32.768, DB3=1.000.000 registros) y tres perfiles de parámetros criptográficos (`full`, `tight`, `min`), con 20 repeticiones cada configuración. Los resultados se exportan a CSV en `results/`.
+
+## Estructura del Proyecto
+
+```
+.
+├── labeling/
+│   ├── labeling.go          # Operaciones CF: Encrypt, Sum, Mult, MultOverflow, etc.
+│   ├── mhe_labeling.go      # Capa MHE: contexto multipartido, descifrado threshold, CF-scalar
+│   └── *_test.go            # Tests table-driven para todas las operaciones
+├── benchmarks/
+│   ├── internal/harness/    # Infraestructura: timing, memoria, CSV
+│   ├── uc1_sum/             # UC1: suma distribuida
+│   ├── uc2_dotproduct/      # UC2: producto escalar
+│   ├── uc3_variance/        # UC3: varianza
+│   └── uc4_variance_compact/# UC4: varianza con CF-scalar
+├── examples/                # Ejemplos de uso: suma, multiplicación, rotación, overflow
+├── specs/features/          # Especificaciones de cada feature (001–015)
+├── results/                 # CSVs de resultados de benchmark
+├── go.mod
+└── go.sum
+```
 
 ## Requisitos
 
@@ -41,203 +69,121 @@ El labeling mantiene información adicional (etiquetas) en los textos cifrados q
 ## Instalación
 
 ```bash
-# Clonar el repositorio
-git clone <url-del-repositorio>
-cd <directorio-del-proyecto>
-
-# Instalar dependencias
+git clone https://github.com/juanmartin1892/lattigo-labeling
+cd lattigo-labeling
 go mod download
 ```
 
 ## Uso
 
-### Ejemplo básico
+### Ejecutar benchmarks
+
+```bash
+# UC4 con todas las variantes (std, label_compact, label_cf_scalar, ...)
+go run ./benchmarks/uc4_variance_compact/
+
+# UC2, UC3 análogamente
+go run ./benchmarks/uc2_dotproduct/
+go run ./benchmarks/uc3_variance/
+```
+
+Los resultados se escriben en `results/`.
+
+### Ejemplos básicos
+
+```bash
+go run ./examples/sum-mult-overflow/   # (v1*v2)*v1 + v1 con labeling
+go run ./examples/rotate/              # rotación de columnas
+go run ./examples/evaluationKeys/      # cambio de clave de evaluación
+```
+
+### Uso de la librería — cifrado CF monopartido
 
 ```go
-package main
+params, _ := labeling.NewParametersFromLiteral(14, []int{56,55,55,54}, []int{55,55}, 0x3ee0001)
+sk, pk := labeling.GenerateKeyPair(params)
+rlk := labeling.GenerateRelinearizationKey(params, sk)
+evk := labeling.GenerateMemEvaluationKeySet(rlk)
 
-import (
-    "log"
-    "<ruta-del-proyecto>/labeling"
-)
+ct1, _ := labeling.Encrypt(params, pk, []uint64{10, 20, 30})
+ct2, _ := labeling.Encrypt(params, pk, []uint64{5, 10, 15})
 
-func main() {
-    // Crear parámetros del esquema
-    params, err := labeling.NewParametersFromLiteral(14,
-        []int{56, 55, 55, 54, 54, 54},
-        []int{55, 55},
-        0x3ee0001)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Generar claves
-    sk, pk := labeling.GenerateKeyPair(params)
-    rlk := labeling.GenerateRelinearizationKey(params, sk)
-    evk := labeling.GenerateMemEvaluationKeySet(rlk)
-
-    // Cifrar valores
-    values1 := []uint64{10, 20, 30, 40}
-    values2 := []uint64{5, 10, 15, 20}
-
-    ct1, _ := labeling.Encrypt(params, pk, values1)
-    ct2, _ := labeling.Encrypt(params, pk, values2)
-
-    // Sumar textos cifrados
-    ctSum, _ := labeling.Sum(params.Parameters, ct1, ct2)
-
-    // Multiplicar textos cifrados
-    ctMult, _ := labeling.Mult(params, ct1, ct2, pk, evk)
-
-    // Descifrar resultado de la suma
-    resultSum, _ := labeling.Decrypt(params, sk, ctSum)
-    log.Printf("Resultado suma: %v", resultSum)
-    
-    // Descifrar resultado de la multiplicación
-    resultMult, _ := labeling.Decrypt(params, sk, ctMult)
-    log.Printf("Resultado multiplicación: %v", resultMult)
-}
+ctMult, _ := labeling.Mult(params, ct1, ct2, pk, evk)
+result, _ := labeling.Decrypt(params, sk, ctMult)
 ```
 
-### Ejemplos incluidos
+### Uso de la librería — protocolo CF-scalar multipartido
 
-El proyecto incluye varios ejemplos que demuestran diferentes aspectos de la implementación:
+```go
+ctx, _ := labeling.NewMHEContext(params, skShares, crs)
 
-#### Ejemplo básico de suma y multiplicación con overflow
-```bash
-cd examples/sum-mult-overflow
-go run main.go
+// Cifrado (cliente por bloque)
+beta, betaSq, S, S2, _, _ := labeling.EncryptCFScalar(ctx, blockValues, maskBound)
+
+// Evaluación (servidor, sin claves)
+alpha, _ := labeling.CFScalarAlpha(ctx, beta, betaSq, S, uint64(params.N()/2))
+
+// Descifrado threshold (una sola ronda)
+share, _ := labeling.GenCiphertextDecryptionShare(ctx, sk, alpha)
+// ... agregar shares ...
+slots, _ := labeling.DecryptThresholdCiphertext(ctx, combined, alpha)
+sumSq := slots[0] + S2  // Σvᵢ²
 ```
-Realiza la operación `((v1 * v2) * v1) + v1` sobre vectores aleatorios, demostrando multiplicaciones múltiples y suma con overflow.
-
-#### Ejemplo de claves de evaluación
-```bash
-cd examples/evaluationKeys
-go run main.go
-```
-Demuestra el uso de claves de evaluación para cambiar la clave secreta asociada a un texto cifrado, tanto para operaciones básicas como con overflow.
-
-#### Ejemplo de rotación básica
-```bash
-cd examples/rotate
-go run main.go
-```
-Muestra cómo realizar rotaciones de columnas en textos cifrados PlaintextLabeledciphertext usando claves de Galois.
-
-#### Ejemplo de rotación con overflow
-```bash
-cd examples/rotate-overflow
-go run main.go
-```
-Demuestra rotaciones de columnas en textos cifrados CiphertextLabeledciphertext resultantes de multiplicaciones con overflow.
-
-## Estructura del Proyecto
-
-```
-.
-├── labeling/
-│   └── labeling.go          # Implementación principal de la librería
-├── examples/
-│   ├── evaluationKeys/
-│   │   └── main.go          # Ejemplo de claves de evaluación
-│   ├── rotate/
-│   │   └── main.go          # Ejemplo de rotación básica
-│   ├── rotate-overflow/
-│   │   └── main.go          # Ejemplo de rotación con overflow
-│   └── sum-mult-overflow/
-│       └── main.go          # Ejemplo de suma y multiplicación con overflow
-├── go.mod                   # Dependencias del proyecto
-├── go.sum                   # Checksums de dependencias
-└── README.md                # Este archivo
-```
-
-**Nota sobre Testing**: Las pruebas unitarias están planificadas como trabajo futuro del proyecto. Los ejemplos en la carpeta `examples/` sirven actualmente como validación funcional de las operaciones implementadas.
 
 ## API Principal
 
-### Tipos
+### `labeling/labeling.go` — operaciones CF monopartido
 
-- `PlaintextLabeledciphertext`: Texto cifrado con elementos A en texto plano
-- `CiphertextLabeledciphertext`: Texto cifrado con elementos A cifrados
+| Función | Descripción |
+|---|---|
+| `NewParametersFromLiteral` | Crea parámetros BGV |
+| `GenerateKeyPair` | Par de claves pública/privada |
+| `GenerateRelinearizationKey` | Clave de relinearización |
+| `GenerateGaloisKeys` | Claves de Galois para rotaciones |
+| `Encrypt` / `EncryptWithMaskBound` | Cifrado CF con máscara aleatoria |
+| `Decrypt` / `DecryptOverflow` | Descifrado single-party |
+| `Sum` / `SumKeepLevel` | Suma CF (level=1 / nivel preservado) |
+| `Mult` / `MultKeepLevel` | Multiplicación CF con relin |
+| `MultOverflow` / `MultOverflowKeepLevel` | Multiplicación CF sin relin → `CiphertextLabeledciphertext` |
+| `SumOverflow` / `SumOverflowCiphertext` | Suma con overflow |
+| `RotateColumns` / `RotateColumnsOverflow` | Rotación de columnas |
+| `RescaleToLevel` | ModSwitch a nivel objetivo |
 
-### Funciones
+### `labeling/mhe_labeling.go` — protocolo MHE multipartido
 
-#### Configuración
-- `NewParametersFromLiteral(logN int, LogQ []int, LogP []int, PlaintextModulus uint64) (Parameters, error)`: Crea parámetros del esquema BGV personalizados
-- `GenerateKeyPair(params Parameters) (*rlwe.SecretKey, rlwe.EncryptionKey)`: Genera par de claves (pública/privada)
-- `GenerateRelinearizationKey(params Parameters, sk *rlwe.SecretKey) *rlwe.RelinearizationKey`: Genera clave de relinealización
-- `GenerateMemEvaluationKeySet(rlk *rlwe.RelinearizationKey) *rlwe.MemEvaluationKeySet`: Crea conjunto de claves de evaluación
-- `GenerateGaloisKeys(params Parameters, sk *rlwe.SecretKey, galEls []uint64) []*rlwe.GaloisKey`: Genera claves de Galois para operaciones de rotación
-- `GenerateMemEvaluationKeySetWithGalois(rlk *rlwe.RelinearizationKey, galKeys ...*rlwe.GaloisKey) *rlwe.MemEvaluationKeySet`: Crea conjunto de claves con claves de Galois
-- `GenerateEvaluationKey(params Parameters, skA, skB *rlwe.SecretKey) *rlwe.EvaluationKey`: Genera clave de evaluación entre dos claves secretas
+| Función | Descripción |
+|---|---|
+| `NewMHEContext` | Contexto multipartido con shares de SK y CRS |
+| `EncryptLabeled` / `EncryptLabeledWithMaskBound` | Cifrado CF con clave colectiva |
+| `EncryptCFScalar` | Cifrado CF-scalar (β, βSq, S, S2 por bloque) |
+| `CFScalarAlpha` | Evaluación `α = 2·S·β + n·βSq` sin claves |
+| `AggregateRawAlphas` | Suma CT+CT de todos los bloques |
+| `GenCiphertextDecryptionShare` | Share CKS sobre un ciphertext raw |
+| `DecryptThresholdCiphertext` | Descifrado threshold con share combinado |
+| `GenLabeledDecryptionShare` | Share CKS para `PlaintextLabeledciphertext` |
+| `AggregateLabeledDecryptionShares` | Combinación de shares |
+| `DecryptThresholdLabeled` | Descifrado threshold labeled |
+| `MultLabeled` / `MultLabeledKeepLevel` | Multiplicación CF MHE |
+| `MultOverflowLabeledFree` | Multiplicación overflow sin rlk |
+| `GenCompactSelfProductShare` | Share compacto para auto-producto UC4 |
+| `DecryptThresholdCompact` | Descifrado compacto UC4 (1 ronda) |
+| `GenCollectiveRelinKey` | Generación colectiva de rlk |
 
-#### Operaciones básicas
-- `Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (PlaintextLabeledciphertext, error)`: Cifra un vector de valores
-- `Decrypt(params Parameters, key *rlwe.SecretKey, labeledciphertext PlaintextLabeledciphertext) ([]uint64, error)`: Descifra un PlaintextLabeledciphertext
-- `Sum(params bgv.Parameters, ct1, ct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error)`: Suma dos PlaintextLabeledciphertext
-- `Mult(params Parameters, ct1, ct2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error)`: Multiplica dos PlaintextLabeledciphertext
+## Hallazgos Principales
 
-#### Operaciones avanzadas
-- `RotateColumns(params Parameters, labeledciphertext PlaintextLabeledciphertext, k int, evk *rlwe.MemEvaluationKeySet) (PlaintextLabeledciphertext, error)`: Rotación de columnas en PlaintextLabeledciphertext
-- `RotateColumnsOverflow(params Parameters, labeledciphertext CiphertextLabeledciphertext, k int, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error)`: Rotación de columnas en CiphertextLabeledciphertext
-- `ApplyEvaluationKey(params Parameters, evalKey rlwe.EvaluationKey, labeledciphertext PlaintextLabeledciphertext) (*PlaintextLabeledciphertext, error)`: Aplica clave de evaluación a PlaintextLabeledciphertext
-- `ApplyEvaluationKeyOverflow(params Parameters, evalKey rlwe.EvaluationKey, labeledciphertext CiphertextLabeledciphertext) (*CiphertextLabeledciphertext, error)`: Aplica clave de evaluación a CiphertextLabeledciphertext
+**UC2/UC3 (profundidad 1 con relin):** A igual nivel de descifrado, CF no aporta ninguna ventaja sobre el estándar. La comunicación threshold es idéntica, y CF es entre un 16% y 62% más lento con mayor uso de memoria. En el perfil de parámetros ajustado (`tight`/level=1), CF falla en corrección donde std acierta, porque el ruido de la máscara supera el presupuesto.
 
-#### Operaciones con overflow
-- `MultOverflow(params Parameters, ct1, ct2 PlaintextLabeledciphertext, key rlwe.EncryptionKey, evk *rlwe.MemEvaluationKeySet) (CiphertextLabeledciphertext, error)`: Multiplicación que devuelve CiphertextLabeledciphertext
-- `SumOverflow(params Parameters, ct1 CiphertextLabeledciphertext, ct2 PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error)`: Suma mixta (Ciphertext + Plaintext)
-- `SumOverflowCiphertext(params Parameters, ct1, ct2 CiphertextLabeledciphertext) (CiphertextLabeledciphertext, error)`: Suma entre CiphertextLabeledciphertext
-- `DecryptOverflow(params Parameters, key *rlwe.SecretKey, labeledciphertext CiphertextLabeledciphertext) ([]uint64, error)`: Descifra un CiphertextLabeledciphertext
-
-## Ventajas del Labeling
-
-**Extensión de la profundidad computacional:**
-Sin labeling, el presupuesto de ruido limita las operaciones a un nivel multiplicativo reducido (ej. x³). Con labeling, es posible realizar multiplicaciones adicionales sobre los resultados intermedios, permitiendo alcanzar niveles superiores (ej. x³ × x³ = x⁶).
-
-**Mejor gestión del ruido:**
-La técnica mantiene componentes adicionales en la estructura del ciphertext que permiten controlar y redistribuir el ruido de forma más eficiente.
-
-**Aplicaciones prácticas:**
-Permite evaluar polinomios de mayor grado y realizar computaciones más complejas sobre datos cifrados sin necesidad de bootstrapping prematuro.
-
-## Limitaciones
-
-- Aunque labeling extiende la profundidad multiplicativa, el número total de operaciones sigue limitado por el presupuesto de ruido global
-- Las operaciones con overflow requieren más recursos computacionales y almacenamiento
+**UC4 con CF-scalar:** Es el único escenario donde CF supera al estándar. Con parámetros mínimos de seguridad (LogQ=[35,35]), el estándar falla en corrección el 100% de las veces y CF-scalar acierta el 100%, con comunicación threshold constante e igual a std y sin necesidad de claves de evaluación. El coste es un cifrado ~2× más lento y una reducción del modelo de privacidad (el servidor aprende agregados por bloque en lugar de nada).
 
 ## Contexto Académico
 
-Este proyecto forma parte del **Trabajo Fin de Máster** del Máster Interuniversitario en Ciberseguridad (Universidad de Vigo/Universidad de A Coruña), curso 2025/2026.
-
-**Tema**: Estudio e implementación de la técnica de labeling en esquemas de cifrado homomórfico multipartito con la librería Lattigo
-
-**Autor**: Juan Martín Pérez
-**Tutores**: Alberto Pedrouzo Ulloa, Fernando Pérez González
+**Máster**: Máster Interuniversitario en Ciberseguridad  
+**Universidades**: Universidade de Vigo / Universidade da Coruña  
+**Curso**: 2025/2026  
+**Autor**: Juan Martín Pérez  
+**Tutores**: Alberto Pedrouzo Ulloa, Fernando Pérez González  
 **Departamento**: Teoría do Sinal e Comunicacións
-
-## Referencias
-
-- Damgård, I., Pastro, V., Smart, N., & Zakarias, S. (2014). **Multiparty Computation from Somewhat Homomorphic Encryption**. IACR Cryptology ePrint Archive, 2014/813. [https://eprint.iacr.org/2014/813.pdf](https://eprint.iacr.org/2014/813.pdf)
-- [Lattigo Documentation](https://github.com/tuneinsight/lattigo)
 
 ## Licencia
 
-```
-Copyright 2025 Juan Martín Pérez
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
-
----
-
-**Nota**: Este proyecto está en desarrollo como parte de un TFM y puede contener funcionalidades experimentales.
+Copyright 2025 Juan Martín Pérez. Licencia Apache 2.0 — ver [LICENSE](LICENSE).
