@@ -297,6 +297,14 @@ func EncryptLabeled(ctx MHEContext, values []uint64) (PlaintextLabeledciphertext
 	return Encrypt(ctx.Params, ctx.CollectivePK, values)
 }
 
+// EncryptLabeledWithMaskBound is like EncryptLabeled but uses the given maskBound
+// instead of the default √t as the upper bound for random mask generation.
+// Set maskBound = min(values) to prevent wrap-around (b_i ≤ v_i always), keeping
+// |canonical(a_i)| ≤ vMax and avoiding noise explosion in CT×PT multiplications (spec 014).
+func EncryptLabeledWithMaskBound(ctx MHEContext, values []uint64, maskBound uint64) (PlaintextLabeledciphertext, error) {
+	return EncryptWithMaskBound(ctx.Params, ctx.CollectivePK, values, maskBound)
+}
+
 // smudgingNoise returns the discrete Gaussian noise distribution used for CKS smudging.
 // σ = 8·DefaultNoise following Mouchet et al. 2021 (PETS); NewKeySwitchProtocol combines
 // this with NoiseFreshSK internally.

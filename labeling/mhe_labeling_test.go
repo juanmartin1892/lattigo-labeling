@@ -1741,3 +1741,70 @@ func TestDecryptThresholdCompact(t *testing.T) {
 		}
 	})
 }
+
+// TestEncryptLabeledWithMaskBound verifies EncryptLabeledWithMaskBound round-trips and
+// that no wrap-around occurs when maskBound ≤ min(values) (spec 014).
+func TestEncryptLabeledWithMaskBound(t *testing.T) {
+	params := testParameters(t)
+
+	cases := []struct {
+		name      string
+		maskBound uint64
+		makeVals  func() []uint64
+	}{
+		{
+			name:      "maskBound=1/values=[1..1000]",
+			maskBound: 1,
+			makeVals: func() []uint64 {
+				v := make([]uint64, params.MaxSlots())
+				for i := range v {
+					v[i] = uint64(1 + i%1000)
+				}
+				return v
+			},
+		},
+		{
+			name:      "maskBound=200/values=[200..1000]",
+			maskBound: 200,
+			makeVals: func() []uint64 {
+				v := make([]uint64, params.MaxSlots())
+				for i := range v {
+					v[i] = uint64(200 + i%801)
+				}
+				return v
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, shares, skIdeal := buildMHETestSetup(t, params, 2)
+			values := tc.makeVals()
+
+			lct, err := EncryptLabeledWithMaskBound(ctx, values, tc.maskBound)
+			if err != nil {
+				t.Fatalf("EncryptLabeledWithMaskBound: %v", err)
+			}
+
+			// Round-trip via threshold decryption.
+			got := decryptThreshold(t, ctx, shares, lct)
+			assertEqualVectors(t, got, values)
+
+			// Sanity-check via ideal key.
+			gotIdeal, err := Decrypt(params, skIdeal, lct)
+			if err != nil {
+				t.Fatalf("Decrypt with ideal key: %v", err)
+			}
+			assertEqualVectors(t, gotIdeal, values)
+
+			// No wrap-around: all a_i canonical ≥ 0 (a_i < t/2).
+			pt := params.PlaintextModulus()
+			for i, a := range lct.elementsA {
+				if a > pt/2 {
+					t.Errorf("slot %d: a=%d is large (canonical negative, possible wrap-around); v=%d maskBound=%d",
+						i, a, values[i], tc.maskBound)
+				}
+			}
+		})
+	}
+}

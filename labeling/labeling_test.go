@@ -667,3 +667,67 @@ func TestRescaleToLevel(t *testing.T) {
 		})
 	}
 }
+
+// TestEncryptWithMaskBound verifies that EncryptWithMaskBound produces a correct
+// round-trip and that no wrap-around occurs when maskBound ≤ min(values) (spec 014).
+func TestEncryptWithMaskBound(t *testing.T) {
+	params := testParameters(t)
+
+	cases := []struct {
+		name      string
+		maskBound uint64
+		values    func() []uint64
+	}{
+		{
+			name:      "maskBound=1 values=[1..1000]",
+			maskBound: 1,
+			values: func() []uint64 {
+				v := make([]uint64, params.MaxSlots())
+				for i := range v {
+					v[i] = uint64(1 + i%1000)
+				}
+				return v
+			},
+		},
+		{
+			name:      "maskBound=100 values=[100..1000]",
+			maskBound: 100,
+			values: func() []uint64 {
+				v := make([]uint64, params.MaxSlots())
+				for i := range v {
+					v[i] = uint64(100 + i%901)
+				}
+				return v
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := testKeys(t, params)
+			values := tc.values()
+
+			lct, err := EncryptWithMaskBound(params, keys.pk, values, tc.maskBound)
+			if err != nil {
+				t.Fatalf("EncryptWithMaskBound: %v", err)
+			}
+
+			// Round-trip: Decrypt must recover values exactly.
+			got, err := Decrypt(params, keys.sk, lct)
+			if err != nil {
+				t.Fatalf("Decrypt: %v", err)
+			}
+			assertEqualVectors(t, got, values)
+
+			// Verify no wrap-around: with maskBound ≤ min(values), b_i < v_i always,
+			// so a_i = v_i - b_i ≥ 0 and canonical(a_i) ≥ 0.
+			pt := params.PlaintextModulus()
+			for i, a := range lct.elementsA {
+				if a > pt/2 {
+					t.Errorf("slot %d: a=%d has negative canonical rep (wrap-around); v=%d maskBound=%d",
+						i, a, values[i], tc.maskBound)
+				}
+			}
+		})
+	}
+}

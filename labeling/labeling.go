@@ -242,6 +242,44 @@ func Encrypt(params Parameters, key rlwe.EncryptionKey, value []uint64) (Plainte
 	return labeledciphertext, nil
 }
 
+// EncryptWithMaskBound is like Encrypt but uses the caller-supplied maskBound instead
+// of the default √t as the upper bound for random mask generation. Setting
+// maskBound ≤ min(values) prevents wrap-around: b_i < v_i always, so
+// a_i = v_i − b_i ≥ 0 and |canonical(a_i)| ≤ vMax, avoiding noise explosion in
+// subsequent CT×PT multiplications (spec 014).
+func EncryptWithMaskBound(params Parameters, key rlwe.EncryptionKey, value []uint64, maskBound uint64) (PlaintextLabeledciphertext, error) {
+	prng, err := sampling.NewPRNG()
+	if err != nil {
+		return PlaintextLabeledciphertext{}, err
+	}
+
+	// roundUpMask returns the bitmask for RandUniform: the smallest (2^k - 1) ≥ n.
+	roundUpMask := uint64(1<<bits.Len64(maskBound) - 1)
+
+	var lct PlaintextLabeledciphertext
+	masks := make([]uint64, params.MaxSlots())
+	lct.elementsA = make(PlaintextElements, 0, params.MaxSlots())
+
+	for i := range params.MaxSlots() {
+		mask := ring.RandUniform(prng, maskBound, roundUpMask)
+		diff := (value[i] - mask + params.PlaintextModulus()) % params.PlaintextModulus()
+		lct.elementsA = append(lct.elementsA, diff)
+		masks[i] = mask
+	}
+
+	maskPT := bgv.NewPlaintext(params.Parameters, params.MaxLevel())
+	if err := bgv.NewEncoder(params.Parameters).Encode(masks, maskPT); err != nil {
+		return lct, err
+	}
+	ctMask, err := rlwe.NewEncryptor(params, key).EncryptNew(maskPT)
+	if err != nil {
+		return lct, err
+	}
+	lct.elementsB = make([][]rlwe.Ciphertext, 1)
+	lct.elementsB[0] = []rlwe.Ciphertext{*ctMask}
+	return lct, nil
+}
+
 // Decrypt decrypts a PlaintextLabeledciphertext to recover the original plaintext values.
 //
 // The algorithm implements:
