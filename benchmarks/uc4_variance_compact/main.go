@@ -113,7 +113,7 @@ func main() {
 				profile.name, db.label, db.n, expSum, expSumSq)
 
 			for rep := 1; rep <= *reps; rep++ {
-				for _, variant := range []string{"std", "label_compact", "label_compact_max"} {
+				for _, variant := range []string{"std", "label_compact", "label_compact_max", "label_compact_mb"} {
 					run := runVariant(variant, params, ds, db.label, rep, profile.name)
 					allRuns = append(allRuns, run)
 					fmt.Printf("  variant=%-14s rep=%2d correct=%-5v total=%7.1fms\n",
@@ -235,9 +235,14 @@ func runVariant(
 	case "std":
 		phases, run.CommBytes, run.Rounds, run.Correct = runStd(params, ds, expSum, expSumSq)
 	case "label_compact":
-		phases, run.CommBytes, run.Rounds, run.Correct = runLabelCompact(params, ds, expSum, expSumSq, false)
+		phases, run.CommBytes, run.Rounds, run.Correct = runLabelCompact(params, ds, expSum, expSumSq, false, nil)
 	case "label_compact_max":
-		phases, run.CommBytes, run.Rounds, run.Correct = runLabelCompact(params, ds, expSum, expSumSq, true)
+		phases, run.CommBytes, run.Rounds, run.Correct = runLabelCompact(params, ds, expSum, expSumSq, true, nil)
+	case "label_compact_mb":
+		encFn := func(ctx labeling.MHEContext, blk []uint64) (labeling.PlaintextLabeledciphertext, error) {
+			return labeling.EncryptLabeledWithMaskBound(ctx, blk, minValInBlock(blk))
+		}
+		phases, run.CommBytes, run.Rounds, run.Correct = runLabelCompact(params, ds, expSum, expSumSq, false, encFn)
 	default:
 		log.Fatalf("unknown variant %q", variant)
 	}
@@ -434,12 +439,21 @@ func stdCKSDecrypt(
 // sum rotate-and-sum keep α/β at MaxLevel via the KeepLevel ops, so the compact threshold
 // decrypt runs at the same level as the std baseline — the fixed-level honest comparison
 // of spec 013. CompactRotateAndSumAlpha already preserves the α level.
+// runLabelCompact runs the label_compact (or label_compact_max / label_compact_mb) variant.
+// encryptFn overrides EncryptLabeled when non-nil (used by label_compact_mb to inject a
+// custom mask bound). When nil, EncryptLabeled is used unchanged.
 func runLabelCompact(
 	params labeling.Parameters,
 	ds harness.Dataset,
 	expSum, expSumSq uint64,
 	keepLevel bool,
+	encryptFn func(labeling.MHEContext, []uint64) (labeling.PlaintextLabeledciphertext, error),
 ) (phases []harness.PhaseResult, commBytes int64, rounds int, correct bool) {
+	if encryptFn == nil {
+		encryptFn = func(ctx labeling.MHEContext, blk []uint64) (labeling.PlaintextLabeledciphertext, error) {
+			return labeling.EncryptLabeled(ctx, blk)
+		}
+	}
 	bgvParams := params.Parameters
 
 	// Select the level-preserving ops for label_compact_max; both share the std signatures.
@@ -493,15 +507,15 @@ func runLabelCompact(
 	lcts2 := make([]labeling.PlaintextLabeledciphertext, len(blks2))
 	phases = append(phases, harness.Run("encrypt", func() {
 		for b := range blks1 {
-			lct, err := labeling.EncryptLabeled(ctx, blks1[b])
+			lct, err := encryptFn(ctx, blks1[b])
 			if err != nil {
-				log.Fatalf("EncryptLabeled blk1[%d]: %v", b, err)
+				log.Fatalf("encrypt blk1[%d]: %v", b, err)
 			}
 			lcts1[b] = lct
 
-			lct2, err := labeling.EncryptLabeled(ctx, blks2[b])
+			lct2, err := encryptFn(ctx, blks2[b])
 			if err != nil {
-				log.Fatalf("EncryptLabeled blk2[%d]: %v", b, err)
+				log.Fatalf("encrypt blk2[%d]: %v", b, err)
 			}
 			lcts2[b] = lct2
 		}
@@ -630,4 +644,19 @@ func labelThresholdDecrypt(
 		log.Fatalf("DecryptThresholdLabeled: %v", err)
 	}
 	return decoded[0]
+}
+
+// minValInBlock returns the smallest non-zero element in blk, ignoring padding zeros.
+// Used to derive a safe maskBound for label_compact_mb (spec 014).
+func minValInBlock(blk []uint64) uint64 {
+	m := uint64(0)
+	for _, v := range blk {
+		if v > 0 && (m == 0 || v < m) {
+			m = v
+		}
+	}
+	if m == 0 {
+		return 1
+	}
+	return m
 }
