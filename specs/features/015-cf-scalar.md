@@ -1,7 +1,7 @@
 # CF-Scalar Protocol for UC4 Variance
 
 **ID:** 015  
-**Estado:** Ready  
+**Estado:** Done  
 **Fecha:** 2026-06-10  
 **Autor:** juanmartin
 
@@ -97,18 +97,18 @@ func DecryptThresholdCiphertext(ctx MHEContext, combined LabeledDecryptionShare,
 
 ## Criterios de Aceptación
 
-- [ ] `TestEncryptCFScalar` table-driven en `labeling/mhe_labeling_test.go` pasando
-- [ ] `TestCFScalarAlpha` en `labeling/mhe_labeling_test.go` pasando
-- [ ] `TestCFScalarE2E` (perfiles full/tight/min) en `labeling/mhe_labeling_test.go` pasando
-- [ ] `TestGenCiphertextDecryptionShare` pasando
-- [ ] `TestDecryptThresholdCiphertext` pasando
-- [ ] Variante `label_cf_scalar` en `benchmarks/uc4_variance_compact/main.go`
-- [ ] `label_cf_scalar`: correct=true para profile=full y tight (20/20)
-- [ ] `label_cf_scalar`: correct=true para profile=min (20/20) — objetivo principal
-- [ ] `std`: correct=false para profile=min (baseline)
-- [ ] CF-scalar setup NO genera rlk ni Galois keys
-- [ ] `go vet ./...` sin warnings
-- [ ] `go test ./labeling/... -race -count=1` sin data races
+- [x] `TestEncryptCFScalar` table-driven en `labeling/mhe_labeling_test.go` pasando
+- [x] `TestCFScalarAlpha` en `labeling/mhe_labeling_test.go` pasando
+- [x] `TestCFScalarE2E` (perfiles full/tight/min) en `labeling/mhe_labeling_test.go` pasando
+- [x] `TestGenCiphertextDecryptionShare` pasando
+- [x] `TestDecryptThresholdCiphertext` pasando
+- [x] Variante `label_cf_scalar` en `benchmarks/uc4_variance_compact/main.go`
+- [x] `label_cf_scalar`: correct=true para profile=full y tight (20/20)
+- [x] `label_cf_scalar`: correct=true para profile=min (20/20) — objetivo principal
+- [x] `std`: correct=false para profile=min (baseline)
+- [x] CF-scalar setup NO genera rlk ni Galois keys
+- [x] `go vet ./...` sin warnings
+- [x] `go test ./labeling/... -race -count=1` sin data races
 
 ---
 
