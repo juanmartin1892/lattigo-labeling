@@ -117,10 +117,10 @@ func main() {
 				profile.name, db.label, db.n, expSum, expSumSq)
 
 			for rep := 1; rep <= *reps; rep++ {
-				for _, variant := range []string{"std", "std_modsw", "label"} {
+				for _, variant := range []string{"std", "std_modsw", "label", "label_max"} {
 					run := runVariant(variant, params, ds, db.label, rep, profile.name)
 					allRuns = append(allRuns, run)
-					fmt.Printf("  variant=%-6s rep=%2d correct=%-5v total=%7.1fms\n",
+					fmt.Printf("  variant=%-9s rep=%2d correct=%-5v total=%7.1fms\n",
 						variant, rep, run.Correct, run.TotalMs())
 				}
 			}
@@ -243,7 +243,9 @@ func runVariant(
 	case "std_modsw":
 		phases, run.CommBytes, run.Rounds, run.Correct = runStd(params, ds, expSum, expSumSq, true)
 	case "label":
-		phases, run.CommBytes, run.Rounds, run.Correct = runLabel(params, ds, expSum, expSumSq)
+		phases, run.CommBytes, run.Rounds, run.Correct = runLabel(params, ds, expSum, expSumSq, false)
+	case "label_max":
+		phases, run.CommBytes, run.Rounds, run.Correct = runLabel(params, ds, expSum, expSumSq, true)
 	default:
 		log.Fatalf("unknown variant %q", variant)
 	}
@@ -455,12 +457,25 @@ func stdCKSDecrypt(
 // runLabel benchmarks the label CF variant for UC3:
 // EncryptLabeled + auto-MultLabeled rotate-and-sum (sum_sq)
 // + SumLabeled rotate-and-sum (sum) + two threshold decrypts.
+//
+// When keepLevel is true (the label_max variant), the multiply and rotate-and-sum keep β
+// at MaxLevel via the KeepLevel ops, so the threshold decrypts run at the same level as
+// the std baseline — the fixed-level honest comparison of spec 013.
 func runLabel(
 	params labeling.Parameters,
 	ds harness.Dataset,
 	expSum, expSumSq uint64,
+	keepLevel bool,
 ) (phases []harness.PhaseResult, commBytes int64, rounds int, correct bool) {
 	bgvParams := params.Parameters
+
+	// Select the level-preserving ops for label_max; both share the std signatures.
+	multFn := labeling.MultLabeled
+	sumFn := labeling.SumLabeled
+	if keepLevel {
+		multFn = labeling.MultLabeledKeepLevel
+		sumFn = labeling.SumLabeledKeepLevel
+	}
 	M := ds.N / 2
 	v1 := ds.Values[:M]
 	v2 := ds.Values[M : 2*M]
@@ -530,7 +545,7 @@ func runLabel(
 		for b := range blks1 {
 			for _, lct := range []labeling.PlaintextLabeledciphertext{lcts1[b], lcts2[b]} {
 				lct := lct // capture
-				lctSq, err := labeling.MultLabeled(ctx, rlk, lct, lct)
+				lctSq, err := multFn(ctx, rlk, lct, lct)
 				if err != nil {
 					log.Fatalf("MultLabeled sq blk %d: %v", b, err)
 				}
@@ -539,7 +554,7 @@ func runLabel(
 					if err != nil {
 						log.Fatalf("RotateColumns sq step=%d: %v", step, err)
 					}
-					lctSq, err = labeling.SumLabeled(ctx, lctSq, lctRot)
+					lctSq, err = sumFn(ctx, lctSq, lctRot)
 					if err != nil {
 						log.Fatalf("SumLabeled sq step=%d: %v", step, err)
 					}
@@ -548,7 +563,7 @@ func runLabel(
 					tmp := lctSq
 					lctSumSq = &tmp
 				} else {
-					sum, err := labeling.SumLabeled(ctx, *lctSumSq, lctSq)
+					sum, err := sumFn(ctx, *lctSumSq, lctSq)
 					if err != nil {
 						log.Fatalf("SumLabeled sq acc: %v", err)
 					}
@@ -567,7 +582,7 @@ func runLabel(
 					if err != nil {
 						log.Fatalf("RotateColumns sum step=%d: %v", step, err)
 					}
-					lctS, err = labeling.SumLabeled(ctx, lctS, lctRot)
+					lctS, err = sumFn(ctx, lctS, lctRot)
 					if err != nil {
 						log.Fatalf("SumLabeled sum step=%d: %v", step, err)
 					}
@@ -576,7 +591,7 @@ func runLabel(
 					tmp := lctS
 					lctSum = &tmp
 				} else {
-					s, err := labeling.SumLabeled(ctx, *lctSum, lctS)
+					s, err := sumFn(ctx, *lctSum, lctS)
 					if err != nil {
 						log.Fatalf("SumLabeled sum acc: %v", err)
 					}

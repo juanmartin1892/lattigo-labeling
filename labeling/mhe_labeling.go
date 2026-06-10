@@ -470,6 +470,18 @@ func SumLabeled(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (Plaintex
 	return Sum(ctx.Params.Parameters, lct1, lct2)
 }
 
+// SumLabeledKeepLevel is SumLabeled but keeps β at the inputs' level instead of forcing
+// level=1, so a label rotate-and-sum can run entirely at MaxLevel. See spec 013.
+func SumLabeledKeepLevel(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error) {
+	if len(lct1.elementsB) == 0 || len(lct1.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("SumLabeledKeepLevel: lct1 contains no ciphertext component")
+	}
+	if len(lct2.elementsB) == 0 || len(lct2.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("SumLabeledKeepLevel: lct2 contains no ciphertext component")
+	}
+	return SumKeepLevel(ctx.Params.Parameters, lct1, lct2)
+}
+
 // MultLabeled multiplies two PlaintextLabeledciphertexts encrypted under the same
 // MHEContext collective public key, using the collective relinearization key for degree
 // reduction after the homomorphic multiplication.
@@ -496,6 +508,23 @@ func MultLabeled(ctx MHEContext, rlk *rlwe.RelinearizationKey, lct1, lct2 Plaint
 	return Mult(ctx.Params, lct1, lct2, ctx.CollectivePK, evk)
 }
 
+// MultLabeledKeepLevel is MultLabeled but keeps β at the inputs' level (MaxLevel for fresh
+// ciphertexts) instead of forcing level=1, so that the label threshold decryption can be
+// measured at the same level as the std baseline. See spec 013.
+func MultLabeledKeepLevel(ctx MHEContext, rlk *rlwe.RelinearizationKey, lct1, lct2 PlaintextLabeledciphertext) (PlaintextLabeledciphertext, error) {
+	if rlk == nil {
+		return PlaintextLabeledciphertext{}, errors.New("MultLabeledKeepLevel: rlk must not be nil")
+	}
+	if len(lct1.elementsB) == 0 || len(lct1.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("MultLabeledKeepLevel: lct1 contains no ciphertext component")
+	}
+	if len(lct2.elementsB) == 0 || len(lct2.elementsB[0]) == 0 {
+		return PlaintextLabeledciphertext{}, errors.New("MultLabeledKeepLevel: lct2 contains no ciphertext component")
+	}
+	evk := GenerateMemEvaluationKeySet(rlk)
+	return MultKeepLevel(ctx.Params, lct1, lct2, ctx.CollectivePK, evk)
+}
+
 // MultOverflowLabeled multiplies two PlaintextLabeledciphertexts encrypted under the same
 // MHEContext collective public key using the overflow technique, returning a
 // CiphertextLabeledciphertext that supports deeper multiplicative depth.
@@ -520,6 +549,19 @@ func MultOverflowLabeled(ctx MHEContext, rlk *rlwe.RelinearizationKey, lct1, lct
 	}
 	evk := GenerateMemEvaluationKeySet(rlk)
 	return MultOverflow(ctx.Params, lct1, lct2, ctx.CollectivePK, evk)
+}
+
+// MultOverflowLabeledFreeKeepLevel is the MaxLevel mirror of MultOverflowLabeledFree: α is
+// kept at the inputs' level instead of level=1, for the UC4 fixed-level honest comparison.
+// Like MultOverflowLabeledFree it needs no relinearization key. See spec 013.
+func MultOverflowLabeledFreeKeepLevel(ctx MHEContext, lct1, lct2 PlaintextLabeledciphertext) (CiphertextLabeledciphertext, error) {
+	if len(lct1.elementsB) == 0 || len(lct1.elementsB[0]) == 0 {
+		return CiphertextLabeledciphertext{}, errors.New("MultOverflowLabeledFreeKeepLevel: lct1 contains no ciphertext component")
+	}
+	if len(lct2.elementsB) == 0 || len(lct2.elementsB[0]) == 0 {
+		return CiphertextLabeledciphertext{}, errors.New("MultOverflowLabeledFreeKeepLevel: lct2 contains no ciphertext component")
+	}
+	return MultOverflowKeepLevel(ctx.Params, lct1, lct2, ctx.CollectivePK, nil)
 }
 
 // SumOverflowLabeled adds a CiphertextLabeledciphertext and a PlaintextLabeledciphertext
