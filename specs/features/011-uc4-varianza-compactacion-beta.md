@@ -1,7 +1,7 @@
 # UC4: Varianza con Compactación de β en Descifrado Threshold
 
 **ID:** 011  
-**Estado:** Ready  
+**Estado:** Done  
 **Fecha:** 2026-06-08  
 **Autor:** juanmartin
 
