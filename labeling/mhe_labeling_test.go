@@ -5,6 +5,7 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/multiparty"
+	"github.com/tuneinsight/lattigo/v6/schemes/bgv"
 	"github.com/tuneinsight/lattigo/v6/utils/sampling"
 )
 
@@ -1738,6 +1739,305 @@ func TestDecryptThresholdCompact(t *testing.T) {
 					t.Fatal("expected error, got nil")
 				}
 			})
+		}
+	})
+}
+
+// --- Spec 015: CF-Scalar Protocol ---
+
+// testCFScalarSetup builds a small dataset for CF-scalar tests.
+// Returns values of length maxSlots, with blockSize real values in [vMin, vMax] and
+// zero padding in remaining slots.
+func testCFScalarSetup(params Parameters, vMin, vMax uint64) []uint64 {
+	blockSize := params.N() / 2
+	values := make([]uint64, params.MaxSlots())
+	for i := 0; i < blockSize; i++ {
+		values[i] = vMin + uint64(i)%(vMax-vMin+1)
+	}
+	return values
+}
+
+// decodeCT decrypts ct with skIdeal and decodes into a uint64 slice of length maxSlots.
+func decodeCT(t *testing.T, params Parameters, skIdeal *rlwe.SecretKey, ct *rlwe.Ciphertext) []uint64 {
+	t.Helper()
+	pt := rlwe.NewDecryptor(params.Parameters, skIdeal).DecryptNew(ct)
+	out := make([]uint64, params.MaxSlots())
+	if err := bgv.NewEncoder(params.Parameters).Decode(pt, out); err != nil {
+		t.Fatalf("decodeCT: %v", err)
+	}
+	return out
+}
+
+// TestEncryptCFScalar verifies that β decrypts to [bj,...,bj] and βSq to [bj²,...,bj²]
+// in the first blockSize slots, and that S and S2 are correctly computed (spec 015).
+func TestEncryptCFScalar(t *testing.T) {
+	params := testParameters(t)
+
+	t.Run("BetaDecryptsToConstant", func(t *testing.T) {
+		ctx, _, skIdeal := buildMHETestSetup(t, params, 2)
+		values := testCFScalarSetup(params, 100, 1000)
+		maskBound := uint64(100)
+		blockSize := params.N() / 2
+
+		beta, betaSq, _, _, bj, err := EncryptCFScalar(ctx, values, maskBound)
+		if err != nil {
+			t.Fatalf("EncryptCFScalar: %v", err)
+		}
+		bjSq := bj * bj % params.PlaintextModulus()
+
+		betaSlots := decodeCT(t, params, skIdeal, beta)
+		for i := 0; i < blockSize; i++ {
+			if betaSlots[i] != bj {
+				t.Errorf("beta slot %d: got %d, want %d (bj)", i, betaSlots[i], bj)
+				if i > 3 {
+					t.FailNow()
+				}
+			}
+		}
+
+		betaSqSlots := decodeCT(t, params, skIdeal, betaSq)
+		for i := 0; i < blockSize; i++ {
+			if betaSqSlots[i] != bjSq {
+				t.Errorf("betaSq slot %d: got %d, want %d (bj²)", i, betaSqSlots[i], bjSq)
+				if i > 3 {
+					t.FailNow()
+				}
+			}
+		}
+	})
+
+	t.Run("SAndS2Correct", func(t *testing.T) {
+		ctx, _, _ := buildMHETestSetup(t, params, 2)
+		values := testCFScalarSetup(params, 1, 100)
+		maskBound := uint64(1)
+		blockSize := params.N() / 2
+		T := params.PlaintextModulus()
+
+		_, _, S, S2, bj, err := EncryptCFScalar(ctx, values, maskBound)
+		if err != nil {
+			t.Fatalf("EncryptCFScalar: %v", err)
+		}
+
+		wantS, wantS2 := uint64(0), uint64(0)
+		for i := 0; i < blockSize; i++ {
+			ai := (values[i] - bj + T) % T
+			wantS = (wantS + ai) % T
+			wantS2 = (wantS2 + ai*ai%T) % T
+		}
+		if S != wantS {
+			t.Errorf("S: got %d, want %d", S, wantS)
+		}
+		if S2 != wantS2 {
+			t.Errorf("S2: got %d, want %d", S2, wantS2)
+		}
+	})
+
+	t.Run("Error_maskBoundZero", func(t *testing.T) {
+		ctx, _, _ := buildMHETestSetup(t, params, 2)
+		values := testCFScalarSetup(params, 1, 100)
+		_, _, _, _, _, err := EncryptCFScalar(ctx, values, 0)
+		if err == nil {
+			t.Fatal("expected error for maskBound=0, got nil")
+		}
+	})
+}
+
+// TestCFScalarAlpha verifies α = 2·S·β + blockSize·β_sq decrypts to
+// 2·S·bj + blockSize·bj² in data slots (spec 015).
+func TestCFScalarAlpha(t *testing.T) {
+	params := testParameters(t)
+	ctx, _, skIdeal := buildMHETestSetup(t, params, 2)
+	T := params.PlaintextModulus()
+	blockSize := uint64(params.N() / 2)
+
+	values := testCFScalarSetup(params, 10, 500)
+	maskBound := uint64(10)
+
+	beta, betaSq, S, _, bj, err := EncryptCFScalar(ctx, values, maskBound)
+	if err != nil {
+		t.Fatalf("EncryptCFScalar: %v", err)
+	}
+
+	alpha, err := CFScalarAlpha(ctx, beta, betaSq, S, blockSize)
+	if err != nil {
+		t.Fatalf("CFScalarAlpha: %v", err)
+	}
+
+	// Expected: α[0] = 2·S·bj + blockSize·bj² mod t.
+	want := (2 * S % T * bj % T + blockSize%T * (bj*bj%T) % T) % T
+
+	alphaSlots := decodeCT(t, params, skIdeal, alpha)
+	if alphaSlots[0] != want {
+		t.Errorf("alpha[0]: got %d, want %d", alphaSlots[0], want)
+	}
+
+	t.Run("Error_nilBeta", func(t *testing.T) {
+		_, err := CFScalarAlpha(ctx, nil, betaSq, S, blockSize)
+		if err == nil {
+			t.Fatal("expected error for nil beta")
+		}
+	})
+	t.Run("Error_nilBetaSq", func(t *testing.T) {
+		_, err := CFScalarAlpha(ctx, beta, nil, S, blockSize)
+		if err == nil {
+			t.Fatal("expected error for nil betaSq")
+		}
+	})
+}
+
+// TestCFScalarE2E verifies the full CF-scalar protocol round-trip: EncryptCFScalar +
+// CFScalarAlpha + AggregateRawAlphas + threshold CKS decrypt = Σ v_i² mod t (spec 015).
+func TestCFScalarE2E(t *testing.T) {
+	params := testParameters(t)
+	T := params.PlaintextModulus()
+	blockSize := uint64(params.N() / 2)
+
+	cases := []struct {
+		name       string
+		vMin, vMax uint64
+		nBlocks    int
+	}{
+		{name: "single_block/range[1,100]", vMin: 1, vMax: 100, nBlocks: 1},
+		{name: "two_blocks/range[1,1000]", vMin: 1, vMax: 1000, nBlocks: 2},
+		{name: "single_block/maskBound=vMin=1", vMin: 1, vMax: 50, nBlocks: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, shares, _ := buildMHETestSetup(t, params, 2)
+
+			allValues := make([][]uint64, tc.nBlocks)
+			expectedSumSq := uint64(0)
+			for b := 0; b < tc.nBlocks; b++ {
+				blk := make([]uint64, params.MaxSlots())
+				for i := uint64(0); i < blockSize; i++ {
+					blk[i] = tc.vMin + (uint64(b)*blockSize+i)%(tc.vMax-tc.vMin+1)
+					expectedSumSq = (expectedSumSq + blk[i]*blk[i]%T) % T
+				}
+				allValues[b] = blk
+			}
+
+			// Encrypt all blocks.
+			alphas := make([]*rlwe.Ciphertext, tc.nBlocks)
+			S2Total := uint64(0)
+			for b, blk := range allValues {
+				maskBound := tc.vMin
+				beta, betaSq, S, S2, _, err := EncryptCFScalar(ctx, blk, maskBound)
+				if err != nil {
+					t.Fatalf("EncryptCFScalar block %d: %v", b, err)
+				}
+				alpha, err := CFScalarAlpha(ctx, beta, betaSq, S, blockSize)
+				if err != nil {
+					t.Fatalf("CFScalarAlpha block %d: %v", b, err)
+				}
+				alphas[b] = alpha
+				S2Total = (S2Total + S2) % T
+			}
+
+			// Aggregate.
+			alphaTotal, err := AggregateRawAlphas(ctx, alphas)
+			if err != nil {
+				t.Fatalf("AggregateRawAlphas: %v", err)
+			}
+
+			// Threshold CKS decrypt.
+			decShares := make([]LabeledDecryptionShare, len(shares))
+			for i, sk := range shares {
+				decShares[i], err = GenCiphertextDecryptionShare(ctx, sk, alphaTotal)
+				if err != nil {
+					t.Fatalf("GenCiphertextDecryptionShare[%d]: %v", i, err)
+				}
+			}
+			combined, err := AggregateLabeledDecryptionShares(ctx, decShares)
+			if err != nil {
+				t.Fatalf("AggregateLabeledDecryptionShares: %v", err)
+			}
+			decVec, err := DecryptThresholdCiphertext(ctx, combined, alphaTotal)
+			if err != nil {
+				t.Fatalf("DecryptThresholdCiphertext: %v", err)
+			}
+
+			got := (decVec[0] + S2Total) % T
+			if got != expectedSumSq {
+				t.Errorf("sumSq: got %d, want %d", got, expectedSumSq)
+			}
+		})
+	}
+}
+
+// TestAggregateRawAlphas verifies AggregateRawAlphas error conditions (spec 015).
+func TestAggregateRawAlphas(t *testing.T) {
+	params := testParameters(t)
+	ctx, _, _ := buildMHETestSetup(t, params, 2)
+	t.Run("Error_empty", func(t *testing.T) {
+		_, err := AggregateRawAlphas(ctx, nil)
+		if err == nil {
+			t.Fatal("expected error for nil alphas")
+		}
+	})
+}
+
+// TestGenCiphertextDecryptionShare verifies error conditions (spec 015).
+func TestGenCiphertextDecryptionShare(t *testing.T) {
+	params := testParameters(t)
+	ctx, shares, _ := buildMHETestSetup(t, params, 2)
+	values := testCFScalarSetup(params, 1, 100)
+	beta, _, _, _, _, err := EncryptCFScalar(ctx, values, 1)
+	if err != nil {
+		t.Fatalf("EncryptCFScalar: %v", err)
+	}
+
+	t.Run("HappyPath", func(t *testing.T) {
+		_, err := GenCiphertextDecryptionShare(ctx, shares[0], beta)
+		if err != nil {
+			t.Fatalf("GenCiphertextDecryptionShare: %v", err)
+		}
+	})
+	t.Run("Error_nilSK", func(t *testing.T) {
+		_, err := GenCiphertextDecryptionShare(ctx, nil, beta)
+		if err == nil {
+			t.Fatal("expected error for nil sk")
+		}
+	})
+	t.Run("Error_nilCT", func(t *testing.T) {
+		_, err := GenCiphertextDecryptionShare(ctx, shares[0], nil)
+		if err == nil {
+			t.Fatal("expected error for nil ct")
+		}
+	})
+}
+
+// TestDecryptThresholdCiphertext verifies error conditions (spec 015).
+func TestDecryptThresholdCiphertext(t *testing.T) {
+	params := testParameters(t)
+	ctx, shares, _ := buildMHETestSetup(t, params, 2)
+	values := testCFScalarSetup(params, 1, 100)
+	beta, _, _, _, _, err := EncryptCFScalar(ctx, values, 1)
+	if err != nil {
+		t.Fatalf("EncryptCFScalar: %v", err)
+	}
+	decShares := make([]LabeledDecryptionShare, len(shares))
+	for i, sk := range shares {
+		decShares[i], err = GenCiphertextDecryptionShare(ctx, sk, beta)
+		if err != nil {
+			t.Fatalf("GenCiphertextDecryptionShare: %v", err)
+		}
+	}
+	combined, err := AggregateLabeledDecryptionShares(ctx, decShares)
+	if err != nil {
+		t.Fatalf("AggregateLabeledDecryptionShares: %v", err)
+	}
+
+	t.Run("HappyPath", func(t *testing.T) {
+		_, err := DecryptThresholdCiphertext(ctx, combined, beta)
+		if err != nil {
+			t.Fatalf("DecryptThresholdCiphertext: %v", err)
+		}
+	})
+	t.Run("Error_nilCT", func(t *testing.T) {
+		_, err := DecryptThresholdCiphertext(ctx, combined, nil)
+		if err == nil {
+			t.Fatal("expected error for nil ct")
 		}
 	})
 }
