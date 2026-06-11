@@ -36,3 +36,21 @@ Thumbs.db
 # Archivos temporales
 *.tmp
 *.log
+
+# Interno
+memoria
+
+# Binarios generados por experimentos (anclados a raíz)
+/exp1_rlk_size
+/exp2_mask_range
+/exp2b_overflow_small_values
+/exp3_noise_model
+/exp4_nparties_scaling
+/exp5_uc4_s3_direct
+/exp6_aggregated_cks
+/exp7_heterogeneous
+/exp8_cf_scalar_broadcast
+/uc4_variance_compact
+
+# Claude Code internals
+.claude/scheduled_tasks.lock
