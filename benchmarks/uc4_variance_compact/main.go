@@ -113,7 +113,7 @@ func main() {
 				profile.name, db.label, db.n, expSum, expSumSq)
 
 			for rep := 1; rep <= *reps; rep++ {
-				for _, variant := range []string{"std", "label_compact", "label_compact_max", "label_compact_mb"} {
+				for _, variant := range []string{"std", "label_compact", "label_compact_max", "label_compact_mb", "label_cf_scalar"} {
 					run := runVariant(variant, params, ds, db.label, rep, profile.name)
 					allRuns = append(allRuns, run)
 					fmt.Printf("  variant=%-14s rep=%2d correct=%-5v total=%7.1fms\n",
@@ -243,6 +243,8 @@ func runVariant(
 			return labeling.EncryptLabeledWithMaskBound(ctx, blk, minValInBlock(blk))
 		}
 		phases, run.CommBytes, run.Rounds, run.Correct = runLabelCompact(params, ds, expSum, expSumSq, false, encFn)
+	case "label_cf_scalar":
+		phases, run.CommBytes, run.Rounds, run.Correct = runLabelCFScalar(params, ds, expSum, expSumSq)
 	default:
 		log.Fatalf("unknown variant %q", variant)
 	}
@@ -644,6 +646,153 @@ func labelThresholdDecrypt(
 		log.Fatalf("DecryptThresholdLabeled: %v", err)
 	}
 	return decoded[0]
+}
+
+// runLabelCFScalar benchmarks the CF-scalar protocol (spec 015):
+//   - Setup: NewMHEContext only — no rlk, no Galois keys.
+//   - Encrypt: EncryptCFScalar per block → (beta_j, betaSq_j, S_j, S2_j).
+//   - Eval: CFScalarAlpha per block → AggregateRawAlphas → alphaTotal.
+//          Also accumulate betaTotal = Σ beta_j for sum computation.
+//   - Decrypt: 1 CKS on alphaTotal + 1 CKS on betaTotal (2 shares total per query).
+//   - sumSq = decAlpha[0] + S2_total; sum = S_total + blockSize×decBeta[0].
+//
+// Communication: 2 × shareSize × nParties (vs K × 2 × shareSize for label_compact).
+func runLabelCFScalar(
+	params labeling.Parameters,
+	ds harness.Dataset,
+	expSum, expSumSq uint64,
+) (phases []harness.PhaseResult, commBytes int64, rounds int, correct bool) {
+	bgvParams := params.Parameters
+	M := ds.N / 2
+	v1 := ds.Values[:M]
+	v2 := ds.Values[M : 2*M]
+
+	var skShares [nParties]*rlwe.SecretKey
+	var ctx labeling.MHEContext
+
+	phases = append(phases, harness.Run("setup", func() {
+		kgen := rlwe.NewKeyGenerator(bgvParams)
+		for i := range skShares {
+			skShares[i] = kgen.GenSecretKeyNew()
+		}
+		crs, err := sampling.NewKeyedPRNG(crsSeed)
+		if err != nil {
+			log.Fatalf("NewKeyedPRNG: %v", err)
+		}
+		ctx, err = labeling.NewMHEContext(params, skShares[:], crs)
+		if err != nil {
+			log.Fatalf("NewMHEContext: %v", err)
+		}
+		// No rlk, no Galois keys — CF-scalar uses only CT additions and scalar×CT.
+	}))
+
+	maxSlots := params.MaxSlots()
+	blks1 := blocks(v1, maxSlots)
+	blks2 := blocks(v2, maxSlots)
+
+	phases = append(phases, harness.Run("precomp", func() {
+		_ = blks1
+		_ = blks2
+	}))
+
+	type blockData struct {
+		beta   *rlwe.Ciphertext
+		betaSq *rlwe.Ciphertext
+		S, S2  uint64
+	}
+	var allBlocks []blockData
+
+	phases = append(phases, harness.Run("encrypt", func() {
+		allBlocks = allBlocks[:0]
+		for _, blks := range [][][]uint64{blks1, blks2} {
+			for _, blk := range blks {
+				beta, betaSq, S, S2, _, err := labeling.EncryptCFScalar(ctx, blk, minValInBlock(blk))
+				if err != nil {
+					log.Fatalf("EncryptCFScalar: %v", err)
+				}
+				allBlocks = append(allBlocks, blockData{beta: beta, betaSq: betaSq, S: S, S2: S2})
+			}
+		}
+	}))
+
+	cfBlockSize := uint64(bgvParams.N() / 2)
+	var alphaTotal, betaTotal *rlwe.Ciphertext
+
+	phases = append(phases, harness.Run("eval", func() {
+		alphas := make([]*rlwe.Ciphertext, len(allBlocks))
+		betas := make([]*rlwe.Ciphertext, len(allBlocks))
+		for i, bd := range allBlocks {
+			alpha, err := labeling.CFScalarAlpha(ctx, bd.beta, bd.betaSq, bd.S, cfBlockSize)
+			if err != nil {
+				log.Fatalf("CFScalarAlpha block %d: %v", i, err)
+			}
+			alphas[i] = alpha
+			betas[i] = bd.beta
+		}
+		var err error
+		alphaTotal, err = labeling.AggregateRawAlphas(ctx, alphas)
+		if err != nil {
+			log.Fatalf("AggregateRawAlphas: %v", err)
+		}
+		betaTotal, err = labeling.AggregateRawAlphas(ctx, betas)
+		if err != nil {
+			log.Fatalf("AggregateRawAlphas (beta): %v", err)
+		}
+	}))
+
+	var sumSqResult, sumResult uint64
+	phases = append(phases, harness.Run("decrypt", func() {
+		// CKS on alphaTotal.
+		alphaShares := make([]labeling.LabeledDecryptionShare, nParties)
+		for i, sk := range skShares {
+			var err error
+			alphaShares[i], err = labeling.GenCiphertextDecryptionShare(ctx, sk, alphaTotal)
+			if err != nil {
+				log.Fatalf("GenCiphertextDecryptionShare alpha: %v", err)
+			}
+			commBytes += shareSize(params, alphaTotal.Level())
+		}
+		alphaCombined, err := labeling.AggregateLabeledDecryptionShares(ctx, alphaShares)
+		if err != nil {
+			log.Fatalf("AggregateLabeledDecryptionShares alpha: %v", err)
+		}
+		decAlpha, err := labeling.DecryptThresholdCiphertext(ctx, alphaCombined, alphaTotal)
+		if err != nil {
+			log.Fatalf("DecryptThresholdCiphertext alpha: %v", err)
+		}
+
+		// CKS on betaTotal (to compute sum).
+		betaShares := make([]labeling.LabeledDecryptionShare, nParties)
+		for i, sk := range skShares {
+			betaShares[i], err = labeling.GenCiphertextDecryptionShare(ctx, sk, betaTotal)
+			if err != nil {
+				log.Fatalf("GenCiphertextDecryptionShare beta: %v", err)
+			}
+			commBytes += shareSize(params, betaTotal.Level())
+		}
+		betaCombined, err := labeling.AggregateLabeledDecryptionShares(ctx, betaShares)
+		if err != nil {
+			log.Fatalf("AggregateLabeledDecryptionShares beta: %v", err)
+		}
+		decBeta, err := labeling.DecryptThresholdCiphertext(ctx, betaCombined, betaTotal)
+		if err != nil {
+			log.Fatalf("DecryptThresholdCiphertext beta: %v", err)
+		}
+
+		t := ds.PlaintextModulus
+		S2Total, STotal := uint64(0), uint64(0)
+		for _, bd := range allBlocks {
+			S2Total = (S2Total + bd.S2) % t
+			STotal = (STotal + bd.S) % t
+		}
+		// sumSq = Σ(2·S_j·bj + blockSize·bj²) + Σ S2_j = Σ v_i²
+		sumSqResult = (decAlpha[0] + S2Total) % t
+		// sum = Σ S_j + blockSize × Σ bj = Σ (v_i − bj) + K×blockSize×bj
+		// where decBeta[0] = Σ bj over all K blocks.
+		sumResult = (STotal + cfBlockSize%t*decBeta[0]%t) % t
+	}))
+
+	return phases, commBytes, 1, sumSqResult == expSumSq && sumResult == expSum
 }
 
 // minValInBlock returns the smallest non-zero element in blk, ignoring padding zeros.

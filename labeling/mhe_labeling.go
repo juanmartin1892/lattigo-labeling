@@ -17,11 +17,13 @@ package labeling
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/multiparty"
 	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/schemes/bgv"
+	"github.com/tuneinsight/lattigo/v6/utils/sampling"
 )
 
 // CopyBeta returns a deep copy of lct.elementsB[0][0], the β component used for
@@ -303,6 +305,179 @@ func EncryptLabeled(ctx MHEContext, values []uint64) (PlaintextLabeledciphertext
 // |canonical(a_i)| ≤ vMax and avoiding noise explosion in CT×PT multiplications (spec 014).
 func EncryptLabeledWithMaskBound(ctx MHEContext, values []uint64, maskBound uint64) (PlaintextLabeledciphertext, error) {
 	return EncryptWithMaskBound(ctx.Params, ctx.CollectivePK, values, maskBound)
+}
+
+// EncryptCFScalar generates β = Enc([bj,...,bj]) and βSq = Enc([bj²,...,bj²]) for a
+// broadcast mask bj chosen uniformly in [0, maskBound). Also returns S = Σ(v_i−bj) mod t
+// and S2 = Σ(v_i−bj)² mod t over the first N/2 data slots of values.
+//
+// The CF-scalar formula for one block's contribution to Σv_i² is (spec 015):
+//
+//	slot0(decrypt(CFScalarAlpha(β, βSq, S, N/2))) + S2 = Σ v_i² mod t
+//
+// maskBound must be ≥ 1. Setting maskBound ≤ min(values) ensures no wrap-around.
+func EncryptCFScalar(ctx MHEContext, values []uint64, maskBound uint64) (beta, betaSq *rlwe.Ciphertext, S, S2, bj uint64, err error) {
+	if maskBound == 0 {
+		return nil, nil, 0, 0, 0, errors.New("EncryptCFScalar: maskBound must be ≥ 1")
+	}
+	prng, err := sampling.NewPRNG()
+	if err != nil {
+		return nil, nil, 0, 0, 0, fmt.Errorf("EncryptCFScalar: %w", err)
+	}
+
+	t := ctx.Params.PlaintextModulus()
+	blockSz := ctx.Params.N() / 2
+
+	roundUpMask := uint64(1<<bits.Len64(maskBound) - 1)
+	bj = ring.RandUniform(prng, maskBound, roundUpMask)
+	bjSq := bj * bj % t
+
+	for i := 0; i < blockSz; i++ {
+		ai := (values[i] - bj + t) % t
+		S = (S + ai) % t
+		S2 = (S2 + ai*ai%t) % t
+	}
+
+	bjVec := make([]uint64, blockSz)
+	bjSqVec := make([]uint64, blockSz)
+	for i := range bjVec {
+		bjVec[i] = bj
+		bjSqVec[i] = bjSq
+	}
+
+	enc := rlwe.NewEncryptor(ctx.Params.Parameters, ctx.CollectivePK)
+	encoder := bgv.NewEncoder(ctx.Params.Parameters)
+
+	ptBeta := bgv.NewPlaintext(ctx.Params.Parameters, ctx.Params.MaxLevel())
+	if err = encoder.Encode(bjVec, ptBeta); err != nil {
+		return nil, nil, 0, 0, 0, fmt.Errorf("EncryptCFScalar: encode beta: %w", err)
+	}
+	beta, err = enc.EncryptNew(ptBeta)
+	if err != nil {
+		return nil, nil, 0, 0, 0, fmt.Errorf("EncryptCFScalar: encrypt beta: %w", err)
+	}
+
+	ptBetaSq := bgv.NewPlaintext(ctx.Params.Parameters, ctx.Params.MaxLevel())
+	if err = encoder.Encode(bjSqVec, ptBetaSq); err != nil {
+		return nil, nil, 0, 0, 0, fmt.Errorf("EncryptCFScalar: encode betaSq: %w", err)
+	}
+	betaSq, err = enc.EncryptNew(ptBetaSq)
+	if err != nil {
+		return nil, nil, 0, 0, 0, fmt.Errorf("EncryptCFScalar: encrypt betaSq: %w", err)
+	}
+
+	return beta, betaSq, S, S2, bj, nil
+}
+
+// CFScalarAlpha computes α = 2·S·β + blockSize·β_sq using two scalar×CT multiplications.
+// No relinearization key or Galois keys are required (spec 015).
+//
+// blockSize must equal ctx.Params.N()/2 (8192 for LogN=14), NOT ctx.Params.MaxSlots()
+// which returns N for t ≡ 1 mod 2N. Passing the wrong blockSize silently produces
+// incorrect results.
+func CFScalarAlpha(ctx MHEContext, beta, betaSq *rlwe.Ciphertext, S, blockSize uint64) (*rlwe.Ciphertext, error) {
+	if beta == nil {
+		return nil, errors.New("CFScalarAlpha: beta must not be nil")
+	}
+	if betaSq == nil {
+		return nil, errors.New("CFScalarAlpha: betaSq must not be nil")
+	}
+
+	t := ctx.Params.PlaintextModulus()
+	eval := bgv.NewEvaluator(ctx.Params.Parameters, nil)
+
+	scalar2S := make([]uint64, blockSize)
+	scalarBS := make([]uint64, blockSize)
+	twoS := (2 * S) % t
+	bs := blockSize % t
+	for i := range scalar2S {
+		scalar2S[i] = twoS
+		scalarBS[i] = bs
+	}
+
+	// α = 2·S·β + blockSize·β_sq (two constant-PT × CT multiplications).
+	ctAlpha, err := eval.MulNew(beta, scalar2S)
+	if err != nil {
+		return nil, fmt.Errorf("CFScalarAlpha: MulNew 2S*beta: %w", err)
+	}
+	ctTmp, err := eval.MulNew(betaSq, scalarBS)
+	if err != nil {
+		return nil, fmt.Errorf("CFScalarAlpha: MulNew blockSize*betaSq: %w", err)
+	}
+	if err := eval.Add(ctAlpha, ctTmp, ctAlpha); err != nil {
+		return nil, fmt.Errorf("CFScalarAlpha: Add: %w", err)
+	}
+	return ctAlpha, nil
+}
+
+// AggregateRawAlphas sums a slice of α ciphertexts into a single aggregate ciphertext
+// via CT additions only. No evaluation keys are required (spec 015).
+//
+// alphas must contain at least one element.
+func AggregateRawAlphas(ctx MHEContext, alphas []*rlwe.Ciphertext) (*rlwe.Ciphertext, error) {
+	if len(alphas) == 0 {
+		return nil, errors.New("AggregateRawAlphas: alphas must not be empty")
+	}
+	eval := bgv.NewEvaluator(ctx.Params.Parameters, nil)
+	acc := alphas[0]
+	for i := 1; i < len(alphas); i++ {
+		var err error
+		acc, err = eval.AddNew(acc, alphas[i])
+		if err != nil {
+			return nil, fmt.Errorf("AggregateRawAlphas: Add alpha[%d]: %w", i, err)
+		}
+	}
+	return acc, nil
+}
+
+// GenCiphertextDecryptionShare generates party i's CKS share for switching ct from sk
+// (the party's individual secret key share) to the zero secret key (spec 015).
+//
+// Used to threshold-decrypt a raw *rlwe.Ciphertext (e.g. the α_total from CFScalarAlpha).
+func GenCiphertextDecryptionShare(ctx MHEContext, sk *rlwe.SecretKey, ct *rlwe.Ciphertext) (LabeledDecryptionShare, error) {
+	if sk == nil {
+		return LabeledDecryptionShare{}, errors.New("GenCiphertextDecryptionShare: sk must not be nil")
+	}
+	if ct == nil {
+		return LabeledDecryptionShare{}, errors.New("GenCiphertextDecryptionShare: ct must not be nil")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return LabeledDecryptionShare{}, fmt.Errorf("GenCiphertextDecryptionShare: %w", err)
+	}
+	zeroSK := rlwe.NewSecretKey(ctx.Params)
+	share := proto.AllocateShare(ct.Level())
+	proto.GenShare(sk, zeroSK, ct, &share)
+
+	return LabeledDecryptionShare{Value: share}, nil
+}
+
+// DecryptThresholdCiphertext decrypts ct using the combined CKS share produced by
+// AggregateLabeledDecryptionShares, returning the decoded plaintext slot values (spec 015).
+//
+// The combined share must have been produced from GenCiphertextDecryptionShare calls on ct.
+func DecryptThresholdCiphertext(ctx MHEContext, combined LabeledDecryptionShare, ct *rlwe.Ciphertext) ([]uint64, error) {
+	if ct == nil {
+		return nil, errors.New("DecryptThresholdCiphertext: ct must not be nil")
+	}
+
+	proto, err := multiparty.NewKeySwitchProtocol(ctx.Params, smudgingNoise())
+	if err != nil {
+		return nil, fmt.Errorf("DecryptThresholdCiphertext: %w", err)
+	}
+
+	ctSwitched := rlwe.NewCiphertext(ctx.Params, 1, ct.Level())
+	proto.KeySwitch(ct, combined.Value, ctSwitched)
+
+	zeroSK := rlwe.NewSecretKey(ctx.Params)
+	out := make([]uint64, ctx.Params.MaxSlots())
+	if err := bgv.NewEncoder(ctx.Params.Parameters).Decode(
+		rlwe.NewDecryptor(ctx.Params, zeroSK).DecryptNew(ctSwitched), out,
+	); err != nil {
+		return nil, fmt.Errorf("DecryptThresholdCiphertext: decode: %w", err)
+	}
+	return out, nil
 }
 
 // smudgingNoise returns the discrete Gaussian noise distribution used for CKS smudging.
